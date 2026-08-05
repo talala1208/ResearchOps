@@ -39,4 +39,10 @@ user_prompt_template: |
   当前检索轮次 attempt：
   {attempt}
 
+  当前分发模式：
+  {dispatch_mode}
+
+  如果当前分发模式是 iteration，下面是策略迭代上下文。请优先为证据不足的子问题换关键词、换来源类型或调整搜索渠道，避免重复上一轮无效动作。
+  {search_iteration_context_json}
+
   请生成结构化检索任务计划。

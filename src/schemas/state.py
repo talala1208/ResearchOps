@@ -216,6 +216,10 @@ class ResearchState(TypedDict, total=False):
     # 检索任务
     active_question_ids: list[str]
     search_tasks: list[SearchTask]
+    previous_search_tasks: list[SearchTask]
+    search_dispatch_mode: Literal["initial", "iteration"]
+    search_attempt: int
+    search_iteration_context: dict
 
     # 工具原始输出
     web_search_results: list[dict]
@@ -246,6 +250,8 @@ class ResearchState(TypedDict, total=False):
     search_steps: int
     max_search_steps: int
     step_budget_exhausted: bool
+    search_budget_remaining: int
+    step_budget_reason: str | None
     iteration_count: int
     repeated_action_count: dict[str, int]
 

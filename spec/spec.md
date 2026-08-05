@@ -88,19 +88,19 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 |---|---|---|---|
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `analyze_research_request` | `user_query`、预算默认值 | `research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值 | 真实 LLM 结构化输出节点；必须建立并校验 `question_id` 目录 |
-| `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps` | `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具 |
+| `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps`、`search_dispatch_mode`、`search_iteration_context` | `previous_search_tasks`、`search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具；必须区分初次分发和策略迭代后的再次分发 |
 | `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required` | 当前为替代数据源实现；遇到登录墙、验证码、反爬或需要用户接管时触发 Web HITL |
 | `local_document_search_sub_agent` | `search_tasks`、本地文档配置 | `local_document_results` | 当前为替代数据源实现；真实版本只读本地允许路径 |
 | `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 当前为替代数据源实现，直接提供结构化 mock 结果 |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
 | `tool_output_sanitizer` | `web_search_results`、`local_document_results`、`structured_data_results` | `raw_search_results`、`sanitized_results` | 外部内容必须标记为不可信资料 |
-| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 不生成最终证据结论 |
-| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required` | 发现高冲突时触发冲突 HITL |
-| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 人工确认结果只作为状态事实，不直接改写证据正文 |
-| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`hitl_decisions` | `evidence_matrix` | 必须通过 `question_id` 和 `evidence_id` 关联 |
-| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids` | Priority 影响整体证据充足性评分 |
-| `check_step_budget` | `search_steps`、`max_search_steps` | `step_budget_exhausted` | 只判断检索预算，不负责降级 |
-| `strategy_iteration` | `insufficient_question_ids`、`iteration_count` | `iteration_count`、`active_question_ids` | 实线回到 `dispatch_search_tasks` |
+| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
+| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required` | 当前为确定性规则评分；发现高冲突时触发冲突 HITL |
+| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 当前为替代实现，不真正暂停；人工确认结果只作为状态事实，不直接改写证据正文 |
+| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`hitl_decisions` | `evidence_matrix`、`entity_index.used_evidence_ids` | 必须通过 `question_id` 和 `evidence_id` 关联 |
+| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
+| `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
+| `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `dispatch_search_tasks`；通过 `search_dispatch_mode=iteration` 区分第一次分发 |
 | `prepare_degraded_report` | `degradation_reason`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 只设置降级状态，不写报告正文 |
 | `generate_research_report` | `user_query`、`evidence_matrix`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 普通和降级报告都由此节点生成 |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard` | `review_result` | 只评估研究质量；不评估安全边界 |
@@ -120,6 +120,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 外部网页、文档和工具返回内容只作为不可信资料，不作为系统指令。
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
+- `strategy_iteration` 回到 `dispatch_search_tasks` 前必须写入 `search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次检索任务分发区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成。
 - `review_research_report` 负责研究质量，不负责安全审查。
 - `safety_review` 负责安全边界，不负责研究质量评分。

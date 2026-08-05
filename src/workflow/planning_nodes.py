@@ -96,6 +96,10 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
             "used_evidence_ids": [],
         },
         "active_question_ids": question_ids,
+        "previous_search_tasks": [],
+        "search_dispatch_mode": "initial",
+        "search_attempt": 1,
+        "search_iteration_context": {},
         "search_steps": state.get("search_steps", 0),
         "max_search_steps": state.get("max_search_steps", 3),
         "review_revision_count": state.get("review_revision_count", 0),
@@ -117,6 +121,9 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
     sub_questions = state["sub_questions"]
     minimum_evidence_standard = state["minimum_evidence_standard"]
     active_question_ids = state.get("active_question_ids", list(sub_questions.keys()))
+    dispatch_mode = state.get("search_dispatch_mode", "initial")
+    search_iteration_context = state.get("search_iteration_context", {})
+    previous_search_tasks = state.get("search_tasks", [])
     attempt = state.get("search_steps", 0) + 1
 
     prompt = load_prompt("search_task_planner.yml")
@@ -128,6 +135,8 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
             "minimum_evidence_standard_json": _to_json(minimum_evidence_standard),
             "active_question_ids_json": _to_json(active_question_ids),
             "attempt": attempt,
+            "dispatch_mode": dispatch_mode,
+            "search_iteration_context_json": _to_json(search_iteration_context),
         },
     )
 
@@ -154,7 +163,10 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
 
     return {
         **increase_search_step(state, "dispatch_search_tasks"),
+        "previous_search_tasks": previous_search_tasks,
         "search_tasks": search_tasks,
         "entity_index": entity_index,
         "active_question_ids": task_plan.active_question_ids_after_dispatch,
+        "search_attempt": attempt,
+        "search_dispatch_mode": dispatch_mode,
     }
