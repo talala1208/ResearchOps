@@ -26,6 +26,7 @@ system_prompt: |
   - 如果 sub_questions 是 Q1、Q2、Q3，那么 expected_evidence 必须刚好是 Q1、Q2、Q3，minimum_evidence_standard 也必须刚好是 Q1、Q2、Q3。
   - source_type 只能使用允许枚举：official_docs、pricing_page、changelog、blog、community、github、product_directory、traffic_data、structured_mock、local_document。
   - 默认 AI 产品研究应优先考虑 official_docs、pricing_page、github、product_directory、traffic_data、local_document、structured_mock。
+  - local_document 主要用于检索本地知识类、经验类、复盘类、方法论类内容，例如历史笔记、项目经验、工具使用经验和个人判断依据；不要把它当作官方事实来源。
 user_prompt_template: |
   用户研究主题：
   {user_query}

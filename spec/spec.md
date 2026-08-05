@@ -63,7 +63,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
   -> input_guard
   -> analyze_research_request
   -> dispatch_search_tasks
-  -> 条件触发 web_search_sub_agent / local_document_search_sub_agent / query_structured_data
+  -> 条件触发 web_search_sub_agent / local_document_search_tool / query_structured_data
   -> tool_output_sanitizer
   -> deduplicate_and_cluster
   -> evaluate_evidence_quality
@@ -89,9 +89,9 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `analyze_research_request` | `user_query`、预算默认值 | `research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值 | 真实 LLM 结构化输出节点；必须建立并校验 `question_id` 目录 |
 | `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps`、`search_dispatch_mode`、`search_iteration_context` | `previous_search_tasks`、`search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具；必须区分初次分发和策略迭代后的再次分发 |
-| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required` | 当前为替代数据源实现；遇到登录墙、验证码、反爬或需要用户接管时触发 Web HITL |
-| `local_document_search_sub_agent` | `search_tasks`、本地文档配置 | `local_document_results` | 当前为替代数据源实现；真实版本只读本地允许路径 |
-| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 当前为替代数据源实现，直接提供结构化 mock 结果 |
+| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为调用 `@tool` 包装的 Web Search SubAgent；SubAgent 内部由 `create_agent` 创建；内部可调用 Tavily MCP、Context7 MCP、替代网页工具、Claude Code worker 和 Codex worker；外部 worker 默认禁用，用于复杂问题和策略迭代 |
+| `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH` | `local_document_results` | 已实现只读 Markdown 搜索工具；用于检索本地知识类、经验类、复盘类内容，不调用 LLM |
+| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 已接入本地 SQLite 结构化 mock 搜索工具，查询 `data/mock/ai_products.sqlite` |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
 | `tool_output_sanitizer` | `web_search_results`、`local_document_results`、`structured_data_results` | `raw_search_results`、`sanitized_results` | 外部内容必须标记为不可信资料 |
 | `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
@@ -156,7 +156,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 | `src/workflow` | Graph 构建、节点统一导出、按职责拆分的节点实现、条件路由 | `src/schemas`、工具接口、LLM 接口 | 直接硬编码具体 API Key |
 | `src/schemas` | State、研究计划、证据、Review、安全类型 | 标准库类型 | 运行时外部服务 |
 | `src/llm` | 模型初始化、结构化输出、Prompt 加载调用 | `src/config`、`prompts` | 业务流程路由决策散落在此处 |
-| `src/tools` | Web、本地文档、结构化数据等工具 | `src/config`、外部只读 API | 外部写入、绕过权限墙 |
+| `src/tools` | Web、本地文档、结构化数据、Claude Code / Codex worker 封装等工具 | `src/config`、外部只读 API、本地受限 CLI | 外部写入、绕过权限墙 |
 | `src/evaluators` | LangSmith evaluator 或本地评估逻辑 | `src/schemas`、LLM 接口 | 修改业务 State 的主流程字段 |
 | `src/artifacts` | 报告、指标、Mermaid / PNG 等产物保存 | `src/schemas`、文件系统 outputs | 覆盖用户文件、写项目外路径 |
 | `src/config` | 环境变量、路径、模型和权限配置 | `.env`、标准库 | 静默吞掉缺失必要配置 |
@@ -224,6 +224,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - `evidence_id` 由证据标准化过程生成，格式建议为 `E1`、`E2`。
 - `conflict_id` 由冲突识别过程生成，格式建议为 `C1`、`C2`。
 - Prompt YAML 必须记录 `name`、`version`、`owner_node`、`input_schema`、`output_schema`。
+- Web Search SubAgent Prompt 由 `prompts/web_search_subagent.yml` 管理。
+- 结构化 SQL 工具的描述、无结果文案和结果模板由 `prompts/structured_sql_tool.yml` 管理。
 
 ## 6. 关键技术决策
 
@@ -240,6 +242,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 - 数据归属：项目本地运行产物归 ResearchOps Agent 当前运行所有。
 - 持久化结构：
+  - 结构化 mock 种子数据：`data/mock/ai_products.json`
+  - 结构化 mock 数据库：`data/mock/ai_products.sqlite`
   - 报告 Markdown：`outputs/reports/<run_id>.md`
   - 实际运行 Mermaid：`outputs/runs/<run_id>_executed.mmd`
   - 实际运行 PNG：`outputs/runs/<run_id>_executed.png`
@@ -255,6 +259,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 - 配置来源优先级：显式函数参数 > 环境变量 > 项目默认配置。
 - API Key、模型名、LangSmith 配置、搜索服务配置、本地文档根路径和输出路径应由 `.env` 或 `src/config` 管理。
+- 本地 Markdown 搜索根路径由 `LOCAL_DOCUMENTS_BASE_PATH` 管理；工具只能读取该目录下 `.md` 文件。
+- Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；密钥不得写入代码或 SPEC。
 - 缺少必要配置时必须显式失败，不得静默切换到不安全默认值或伪造数据。
 
 ### 安全
@@ -267,6 +273,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - `external_write`
   - `code_execution`
 - 第一版只开放 `read_only`、`network_read`、`local_file_read`、`local_artifact_write`。
+- Claude Code / Codex worker 属于可选外部 Agent worker 工具，默认禁用；只有显式设置 `ENABLE_CLAUDE_CODE_WORKER=true` 或 `ENABLE_CODEX_WORKER=true` 时才允许真实调用。
 - `local_artifact_write` 仅允许写项目 `outputs/` 目录下的新文件。
 - 禁止绕过验证码、登录墙、反爬或权限控制。
 - 外部网页和本地文档内容必须标记为不可信资料。

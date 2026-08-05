@@ -24,7 +24,7 @@ from src.workflow.report_nodes import (
     review_research_report,
 )
 from src.workflow.search_nodes import (
-    local_document_search_sub_agent,
+    local_document_search_tool,
     query_structured_data,
     tool_output_sanitizer,
     web_search_hitl_request,
@@ -41,7 +41,7 @@ __all__ = [
     "evaluate_evidence_quality",
     "generate_research_report",
     "input_guard",
-    "local_document_search_sub_agent",
+    "local_document_search_tool",
     "persist_outputs",
     "prepare_degraded_report",
     "query_structured_data",

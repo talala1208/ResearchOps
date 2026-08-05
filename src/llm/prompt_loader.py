@@ -45,3 +45,16 @@ def render_prompt_template(template: str, variables: dict[str, Any]) -> str:
         return template.format(**variables)
     except KeyError as exc:
         raise ValueError(f"Prompt 模板缺少变量：{exc.args[0]}") from exc
+
+
+def load_yaml_config(file_name: str) -> dict[str, Any]:
+    """读取普通 YAML 配置，不强制要求 Prompt 字段。"""
+
+    config_path = get_prompts_dir() / file_name
+    if not config_path.exists():
+        raise FileNotFoundError(f"YAML 配置文件不存在：{config_path}")
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML 配置必须是对象：{config_path}")
+    return data

@@ -15,7 +15,7 @@ from src.workflow.edges import (
     EVALUATE_EVIDENCE_QUALITY,
     GENERATE_RESEARCH_REPORT,
     INPUT_GUARD,
-    LOCAL_DOCUMENT_SEARCH_SUB_AGENT,
+    LOCAL_DOCUMENT_SEARCH_TOOL,
     PERSIST_OUTPUTS,
     PREPARE_DEGRADED_REPORT,
     QUERY_STRUCTURED_DATA,
@@ -38,7 +38,7 @@ from src.workflow.nodes import (
     evaluate_evidence_quality,
     generate_research_report,
     input_guard,
-    local_document_search_sub_agent,
+    local_document_search_tool,
     persist_outputs,
     prepare_degraded_report,
     query_structured_data,
@@ -62,7 +62,7 @@ def build_graph():
     builder.add_node(DISPATCH_SEARCH_TASKS, dispatch_search_tasks)
     builder.add_node(WEB_SEARCH_SUB_AGENT, web_search_sub_agent)
     builder.add_node(WEB_SEARCH_HITL_REQUEST, web_search_hitl_request)
-    builder.add_node(LOCAL_DOCUMENT_SEARCH_SUB_AGENT, local_document_search_sub_agent)
+    builder.add_node(LOCAL_DOCUMENT_SEARCH_TOOL, local_document_search_tool)
     builder.add_node(QUERY_STRUCTURED_DATA, query_structured_data)
     builder.add_node(TOOL_OUTPUT_SANITIZER, tool_output_sanitizer)
     builder.add_node(DEDUPLICATE_AND_CLUSTER, deduplicate_and_cluster)

@@ -36,7 +36,7 @@ NODE_CLASSES = {
     ],
     "tool": [
         "web_search_sub_agent",
-        "local_document_search_sub_agent",
+        "local_document_search_tool",
         "query_structured_data",
     ],
     "evidence": [

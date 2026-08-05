@@ -26,6 +26,7 @@ DASHSCOPE_MODEL_FIELDS = {
     "input_guard": "SAFETY_GUARD_MODEL",
     "research_planner": "RESEARCH_PLANNER_MODEL",
     "search_task_planner": "SEARCH_TASK_PLANNER_MODEL",
+    "web_search_subagent": "WEB_SEARCH_SUBAGENT_MODEL",
 }
 
 

@@ -11,7 +11,7 @@ INPUT_GUARD = "input_guard"
 ANALYZE_RESEARCH_REQUEST = "analyze_research_request"
 DISPATCH_SEARCH_TASKS = "dispatch_search_tasks"
 WEB_SEARCH_SUB_AGENT = "web_search_sub_agent"
-LOCAL_DOCUMENT_SEARCH_SUB_AGENT = "local_document_search_sub_agent"
+LOCAL_DOCUMENT_SEARCH_TOOL = "local_document_search_tool"
 QUERY_STRUCTURED_DATA = "query_structured_data"
 TOOL_OUTPUT_SANITIZER = "tool_output_sanitizer"
 DEDUPLICATE_AND_CLUSTER = "deduplicate_and_cluster"
@@ -50,7 +50,7 @@ def route_after_dispatch_search_tasks(state: ResearchState) -> list[str]:
     if not search_tasks:
         return [
             WEB_SEARCH_SUB_AGENT,
-            LOCAL_DOCUMENT_SEARCH_SUB_AGENT,
+            LOCAL_DOCUMENT_SEARCH_TOOL,
             QUERY_STRUCTURED_DATA,
         ]
 
@@ -69,14 +69,14 @@ def route_after_dispatch_search_tasks(state: ResearchState) -> list[str]:
         }:
             target_nodes.add(WEB_SEARCH_SUB_AGENT)
         elif source_type == "local_document":
-            target_nodes.add(LOCAL_DOCUMENT_SEARCH_SUB_AGENT)
+            target_nodes.add(LOCAL_DOCUMENT_SEARCH_TOOL)
         elif source_type == "structured_mock":
             target_nodes.add(QUERY_STRUCTURED_DATA)
 
     if not target_nodes:
         return [
             WEB_SEARCH_SUB_AGENT,
-            LOCAL_DOCUMENT_SEARCH_SUB_AGENT,
+            LOCAL_DOCUMENT_SEARCH_TOOL,
             QUERY_STRUCTURED_DATA,
         ]
 
@@ -175,7 +175,7 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
         route_after_dispatch_search_tasks,
         {
             WEB_SEARCH_SUB_AGENT: WEB_SEARCH_SUB_AGENT,
-            LOCAL_DOCUMENT_SEARCH_SUB_AGENT: LOCAL_DOCUMENT_SEARCH_SUB_AGENT,
+            LOCAL_DOCUMENT_SEARCH_TOOL: LOCAL_DOCUMENT_SEARCH_TOOL,
             QUERY_STRUCTURED_DATA: QUERY_STRUCTURED_DATA,
         },
     )
@@ -189,7 +189,7 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
     )
     builder.add_edge(WEB_SEARCH_HITL_REQUEST, TOOL_OUTPUT_SANITIZER)
     builder.add_edge(
-        [LOCAL_DOCUMENT_SEARCH_SUB_AGENT, QUERY_STRUCTURED_DATA],
+        [LOCAL_DOCUMENT_SEARCH_TOOL, QUERY_STRUCTURED_DATA],
         TOOL_OUTPUT_SANITIZER,
     )
 
