@@ -31,8 +31,7 @@ NODE_CLASSES = {
         "safety_review",
     ],
     "planner": [
-        "analyze_research_request",
-        "dispatch_search_tasks",
+        "plan_research",
     ],
     "tool": [
         "web_search_sub_agent",

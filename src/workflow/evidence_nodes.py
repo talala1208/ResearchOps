@@ -425,8 +425,8 @@ def check_step_budget(state: ResearchState) -> dict[str, Any]:
 def strategy_iteration(state: ResearchState) -> dict[str, Any]:
     """证据不足时的策略迭代节点。
 
-    该节点不直接生成检索任务，只准备下一次 `dispatch_search_tasks` 所需的
-    迭代上下文，明确区分初次分发和二次分发。
+    该节点不直接生成检索任务，只准备下一次 `plan_research` 所需的
+    迭代上下文，明确区分初始规划和策略迭代。
     """
 
     sub_questions = state["sub_questions"]
@@ -467,6 +467,7 @@ def strategy_iteration(state: ResearchState) -> dict[str, Any]:
         "iteration_count": iteration_count,
         "repeated_action_count": repeated_action_count,
         "active_question_ids": insufficient_question_ids,
+        "planning_mode": "iteration",
         "search_dispatch_mode": "iteration",
         "search_iteration_context": search_iteration_context,
     }

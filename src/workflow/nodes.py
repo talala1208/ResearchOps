@@ -17,7 +17,7 @@ from src.workflow.evidence_nodes import (
     strategy_iteration,
 )
 from src.workflow.guard_nodes import input_guard, safety_review
-from src.workflow.planning_nodes import analyze_research_request, dispatch_search_tasks
+from src.workflow.planning_nodes import plan_research
 from src.workflow.report_nodes import (
     generate_research_report,
     prepare_degraded_report,
@@ -32,12 +32,11 @@ from src.workflow.search_nodes import (
 )
 
 __all__ = [
-    "analyze_research_request",
+    "plan_research",
     "build_evidence_matrix",
     "check_evidence_sufficiency",
     "check_step_budget",
     "deduplicate_and_cluster",
-    "dispatch_search_tasks",
     "evaluate_evidence_quality",
     "generate_research_report",
     "input_guard",

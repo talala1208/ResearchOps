@@ -190,6 +190,12 @@ class EvaluationMetrics(TypedDict):
     web_hitl_trigger_count_by_source: dict[str, int]
 
 
+class ResearchInput(TypedDict):
+    """LangGraph Studio 入口输入。"""
+
+    user_query: str
+
+
 class ResearchState(TypedDict, total=False):
     """ResearchOps Agent 全局状态。
 
@@ -217,6 +223,7 @@ class ResearchState(TypedDict, total=False):
     active_question_ids: list[str]
     search_tasks: list[SearchTask]
     previous_search_tasks: list[SearchTask]
+    planning_mode: Literal["initial", "iteration"]
     search_dispatch_mode: Literal["initial", "iteration"]
     search_attempt: int
     search_iteration_context: dict

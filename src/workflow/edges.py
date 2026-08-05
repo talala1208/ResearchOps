@@ -9,8 +9,7 @@ from src.schemas.state import ResearchState
 
 
 INPUT_GUARD = "input_guard"
-ANALYZE_RESEARCH_REQUEST = "analyze_research_request"
-DISPATCH_SEARCH_TASKS = "dispatch_search_tasks"
+PLAN_RESEARCH = "plan_research"
 WEB_SEARCH_SUB_AGENT = "web_search_sub_agent"
 LOCAL_DOCUMENT_SEARCH_TOOL = "local_document_search_tool"
 QUERY_STRUCTURED_DATA = "query_structured_data"
@@ -36,10 +35,10 @@ def route_after_input_guard(state: ResearchState) -> str:
     result = state.get("input_guard_result", {})
     if result.get("safety_pass") is False or result.get("downgrade_required") is True:
         return PREPARE_DEGRADED_REPORT
-    return ANALYZE_RESEARCH_REQUEST
+    return PLAN_RESEARCH
 
 
-def route_after_dispatch_search_tasks(state: ResearchState) -> list[str]:
+def route_after_plan_research(state: ResearchState) -> list[str]:
     """检索任务分发后的条件路由。
 
     后续根据 `search_tasks` 中的 `source_type` 精确决定触发哪些工具。
@@ -169,17 +168,15 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
         INPUT_GUARD,
         route_after_input_guard,
         {
-            ANALYZE_RESEARCH_REQUEST: ANALYZE_RESEARCH_REQUEST,
+            PLAN_RESEARCH: PLAN_RESEARCH,
             PREPARE_DEGRADED_REPORT: PREPARE_DEGRADED_REPORT,
         },
     )
 
-    builder.add_edge(ANALYZE_RESEARCH_REQUEST, DISPATCH_SEARCH_TASKS)
-
     # 三类检索能力是条件分发，不是每次运行都必然触发。
     builder.add_conditional_edges(
-        DISPATCH_SEARCH_TASKS,
-        route_after_dispatch_search_tasks,
+        PLAN_RESEARCH,
+        route_after_plan_research,
         {
             WEB_SEARCH_SUB_AGENT: WEB_SEARCH_SUB_AGENT,
             LOCAL_DOCUMENT_SEARCH_TOOL: LOCAL_DOCUMENT_SEARCH_TOOL,
@@ -228,7 +225,7 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
             PREPARE_DEGRADED_REPORT: PREPARE_DEGRADED_REPORT,
         },
     )
-    builder.add_edge(STRATEGY_ITERATION, DISPATCH_SEARCH_TASKS)
+    builder.add_edge(STRATEGY_ITERATION, PLAN_RESEARCH)
 
     builder.add_edge(PREPARE_DEGRADED_REPORT, GENERATE_RESEARCH_REPORT)
     builder.add_edge(GENERATE_RESEARCH_REPORT, REVIEW_RESEARCH_REPORT)

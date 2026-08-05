@@ -17,6 +17,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.tools import tool
+from langsmith import traceable
 
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
@@ -55,6 +56,7 @@ def _parse_json_object_from_model_output(raw_result: str) -> dict[str, Any]:
 
 
 @tool
+@traceable(name="placeholder_search_web_api", run_type="tool")
 def placeholder_search_web_api(query: str, source_type: str) -> str:
     """使用替代 Web Search API 返回候选搜索结果。"""
 
@@ -69,6 +71,7 @@ def placeholder_search_web_api(query: str, source_type: str) -> str:
 
 
 @tool
+@traceable(name="placeholder_fetch_static_page", run_type="tool")
 def placeholder_fetch_static_page(url: str) -> str:
     """使用替代静态网页抓取工具返回网页正文。"""
 
@@ -83,6 +86,7 @@ def placeholder_fetch_static_page(url: str) -> str:
 
 
 @tool
+@traceable(name="placeholder_detect_login_required", run_type="tool")
 def placeholder_detect_login_required(url: str, page_content: str) -> str:
     """判断替代页面是否需要登录或人工接管。"""
 
@@ -96,6 +100,7 @@ def placeholder_detect_login_required(url: str, page_content: str) -> str:
 
 
 @tool
+@traceable(name="placeholder_extract_page_content", run_type="tool")
 def placeholder_extract_page_content(page_content: str) -> str:
     """从替代网页正文抽取证据片段。"""
 
@@ -130,6 +135,7 @@ def build_web_search_subagent():
 
 
 @tool("web_search_subagent_tool")
+@traceable(name="web_search_subagent_tool", run_type="tool")
 def web_search_subagent_tool(task_json: str) -> str:
     """调用 Web Search SubAgent 完成单个 SearchTask 的候选证据收集。"""
 
@@ -160,6 +166,7 @@ def web_search_subagent_tool(task_json: str) -> str:
     return response["messages"][-1].content
 
 
+@traceable(name="run_web_search_subagent_for_task", run_type="chain")
 def run_web_search_subagent_for_task(task: dict[str, Any]) -> dict[str, Any]:
     """运行外层 SubAgent 工具，并解析为 Python dict。"""
 

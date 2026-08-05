@@ -1,4 +1,4 @@
-"""研究规划与检索任务分发节点。"""
+"""研究规划与检索任务生成节点。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,12 @@ from typing import Any
 from src.config.settings import get_workflow_config
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
-from src.llm.structured_outputs import ResearchPlanOutput, SearchTaskPlanOutput
+from src.llm.structured_outputs import (
+    ResearchPlanWithSearchTasksOutput,
+    SearchTaskPlanOutput,
+)
 from src.schemas.state import ResearchState
-from src.workflow.node_utils import increase_search_step, record_node
+from src.workflow.node_utils import increase_search_step
 
 
 def _to_json(value: Any) -> str:
@@ -19,7 +22,7 @@ def _to_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def _validate_research_plan(plan: ResearchPlanOutput) -> None:
+def _validate_research_plan(plan: ResearchPlanWithSearchTasksOutput) -> None:
     """校验研究计划内部 ID 一致性。"""
 
     question_ids = [item.question_id for item in plan.sub_questions]
@@ -58,10 +61,12 @@ def _validate_research_plan(plan: ResearchPlanOutput) -> None:
         )
 
 
-def _validate_search_tasks(state: ResearchState, task_plan: SearchTaskPlanOutput) -> None:
+def _validate_search_tasks(
+    sub_questions: dict[str, Any],
+    task_plan: SearchTaskPlanOutput,
+) -> None:
     """校验检索任务引用的 question_id。"""
 
-    sub_questions = state["sub_questions"]
     task_ids = [task.task_id for task in task_plan.search_tasks]
     if len(task_ids) != len(set(task_ids)):
         raise ValueError("检索任务中存在重复 task_id")
@@ -71,13 +76,17 @@ def _validate_search_tasks(state: ResearchState, task_plan: SearchTaskPlanOutput
             raise ValueError(f"检索任务引用了不存在的 question_id：{task.question_id}")
 
 
-def analyze_research_request(state: ResearchState) -> dict[str, Any]:
-    """研究任务分析节点。
+def _build_search_task_index(task_plan: SearchTaskPlanOutput) -> dict[str, list[str]]:
+    """构建 question_id 到 task_id 的索引。"""
 
-    读取：`user_query`
-    写入：`research_goal`、`sub_questions`、`expected_evidence`、
-    `minimum_evidence_standard`、`entity_index` 和预算初始值。
-    """
+    search_task_ids_by_question_id: dict[str, list[str]] = {}
+    for task in task_plan.search_tasks:
+        search_task_ids_by_question_id.setdefault(task.question_id, []).append(task.task_id)
+    return search_task_ids_by_question_id
+
+
+def _run_initial_planning(state: ResearchState) -> dict[str, Any]:
+    """初始模式：一次性生成研究计划和首轮检索任务。"""
 
     user_query = state["user_query"]
     prompt = load_prompt("research_planner.yml")
@@ -86,7 +95,9 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
         {"user_query": user_query},
     )
 
-    model = build_chat_model("research_planner").with_structured_output(ResearchPlanOutput)
+    model = build_chat_model("research_planner").with_structured_output(
+        ResearchPlanWithSearchTasksOutput
+    )
     plan = model.invoke(
         [
             ("system", prompt["system_prompt"]),
@@ -96,6 +107,8 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
     _validate_research_plan(plan)
 
     sub_questions = {item.question_id: item.model_dump() for item in plan.sub_questions}
+    _validate_search_tasks(sub_questions, plan)
+
     expected_evidence = {
         item.question_id: item.model_dump() for item in plan.expected_evidence
     }
@@ -104,9 +117,9 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
     }
     question_ids = list(sub_questions.keys())
     workflow_config = get_workflow_config()
+    search_task_ids_by_question_id = _build_search_task_index(plan)
 
     return {
-        **record_node(state, "analyze_research_request"),
         "research_goal": plan.research_goal,
         "sub_questions": sub_questions,
         "required_source_types": plan.required_source_types,
@@ -116,13 +129,15 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
             "question_ids": question_ids,
             "evidence_ids_by_question_id": {},
             "conflict_ids_by_question_id": {},
-            "search_task_ids_by_question_id": {},
+            "search_task_ids_by_question_id": search_task_ids_by_question_id,
             "used_evidence_ids": [],
         },
-        "active_question_ids": question_ids,
-        "previous_search_tasks": [],
+        "active_question_ids": plan.active_question_ids_after_dispatch or question_ids,
+        "previous_search_tasks": state.get("search_tasks", []),
+        "search_tasks": [task.model_dump() for task in plan.search_tasks],
+        "planning_mode": "initial",
         "search_dispatch_mode": "initial",
-        "search_attempt": 1,
+        "search_attempt": state.get("search_steps", 0) + 1,
         "search_iteration_context": {},
         "search_steps": state.get("search_steps", 0),
         "max_search_steps": state.get(
@@ -139,19 +154,12 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
     }
 
 
-def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
-    """检索任务分发节点。
-
-    读取：`research_goal`、`sub_questions`、`minimum_evidence_standard`、
-    `active_question_ids`、`search_steps`
-    写入：`search_tasks`、`entity_index.search_task_ids_by_question_id`、
-    `active_question_ids`、`search_steps`
-    """
+def _run_iteration_planning(state: ResearchState) -> dict[str, Any]:
+    """迭代模式：只为证据不足的子问题生成下一轮检索任务。"""
 
     sub_questions = state["sub_questions"]
     minimum_evidence_standard = state["minimum_evidence_standard"]
     active_question_ids = state.get("active_question_ids", list(sub_questions.keys()))
-    dispatch_mode = state.get("search_dispatch_mode", "initial")
     search_iteration_context = state.get("search_iteration_context", {})
     previous_search_tasks = state.get("search_tasks", [])
     attempt = state.get("search_steps", 0) + 1
@@ -165,7 +173,7 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
             "minimum_evidence_standard_json": _to_json(minimum_evidence_standard),
             "active_question_ids_json": _to_json(active_question_ids),
             "attempt": attempt,
-            "dispatch_mode": dispatch_mode,
+            "dispatch_mode": "iteration",
             "search_iteration_context_json": _to_json(search_iteration_context),
         },
     )
@@ -179,12 +187,8 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
             ("human", user_prompt),
         ]
     )
-    _validate_search_tasks(state, task_plan)
-
-    search_tasks = [task.model_dump() for task in task_plan.search_tasks]
-    search_task_ids_by_question_id: dict[str, list[str]] = {}
-    for task in task_plan.search_tasks:
-        search_task_ids_by_question_id.setdefault(task.question_id, []).append(task.task_id)
+    _validate_search_tasks(sub_questions, task_plan)
+    search_task_ids_by_question_id = _build_search_task_index(task_plan)
 
     entity_index = {
         **state["entity_index"],
@@ -192,11 +196,26 @@ def dispatch_search_tasks(state: ResearchState) -> dict[str, Any]:
     }
 
     return {
-        **increase_search_step(state, "dispatch_search_tasks"),
         "previous_search_tasks": previous_search_tasks,
-        "search_tasks": search_tasks,
+        "search_tasks": [task.model_dump() for task in task_plan.search_tasks],
         "entity_index": entity_index,
         "active_question_ids": task_plan.active_question_ids_after_dispatch,
         "search_attempt": attempt,
-        "search_dispatch_mode": dispatch_mode,
+        "planning_mode": "iteration",
+        "search_dispatch_mode": "iteration",
+    }
+
+
+def plan_research(state: ResearchState) -> dict[str, Any]:
+    """研究规划节点，根据 planning_mode 选择初始或迭代 Prompt。"""
+
+    planning_mode = state.get("planning_mode", "initial")
+    if planning_mode == "iteration":
+        updates = _run_iteration_planning(state)
+    else:
+        updates = _run_initial_planning(state)
+
+    return {
+        **updates,
+        **increase_search_step(state, "plan_research"),
     }

@@ -89,3 +89,10 @@ class SearchTaskPlanOutput(BaseModel):
 
     search_tasks: list[SearchTaskOutput]
     active_question_ids_after_dispatch: list[str] = Field(default_factory=list)
+
+
+class ResearchPlanWithSearchTasksOutput(ResearchPlanOutput):
+    """初始研究规划与首轮检索任务结构化输出。"""
+
+    search_tasks: list[SearchTaskOutput]
+    active_question_ids_after_dispatch: list[str] = Field(default_factory=list)

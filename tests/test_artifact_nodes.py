@@ -24,7 +24,7 @@ class PersistOutputsSmokeTest(unittest.TestCase):
                 "final_report": "# Smoke\n\n实际运行链路 PNG 保存测试。\n",
                 "executed_nodes": [
                     "input_guard",
-                    "analyze_research_request",
+                    "plan_research",
                     "generate_research_report",
                     "safety_review",
                 ],

@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import Any
 
 from langchain.tools import tool
+from langsmith import traceable
 
 
 class MCPToolError(RuntimeError):
@@ -176,6 +177,7 @@ def _run_async(coro):
 
 
 @tool
+@traceable(name="tavily_mcp_search", run_type="tool")
 def tavily_mcp_search(query: str) -> str:
     """通过 Tavily remote MCP 搜索网页资料。"""
 
@@ -202,6 +204,7 @@ def tavily_mcp_search(query: str) -> str:
 
 
 @tool
+@traceable(name="context7_mcp_query", run_type="tool")
 def context7_mcp_query(topic: str) -> str:
     """通过 Context7 MCP 查询官方库、框架或 SDK 文档。"""
 

@@ -14,3 +14,6 @@ reference/
 # 文件等
 outputs/
 data/
+
+# LangGraph dev 本地运行状态
+.langgraph_api/

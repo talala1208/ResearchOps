@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from langchain.tools import tool
+from langsmith import traceable
 
 from src.config.settings import get_project_root
 
@@ -44,6 +45,7 @@ CODEX_WORKER_ALLOWED_TOOL_KINDS = {
     ).split(",")
     if item.strip()
 }
+CODEX_WORKER_TIMEOUT_SECONDS = int(os.getenv("CODEX_WORKER_TIMEOUT_SECONDS", "60"))
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ def _compact_prompt(prompt: str, limit: int = 4000) -> str:
 
 
 @tool
+@traceable(name="call_claude_code_worker", run_type="tool")
 def call_claude_code_worker(prompt: str) -> str:
     """调用 Claude Code worker 处理复杂网页研究或策略迭代问题。"""
 
@@ -118,15 +121,29 @@ def call_claude_code_worker(prompt: str) -> str:
             error=f"找不到 Claude Code 命令：{command}",
         ).to_json()
 
-    completed = subprocess.run(
-        [command, *args, _compact_prompt(prompt)],
-        cwd=get_project_root(),
-        env=os.environ.copy(),
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [command, *args, _compact_prompt(prompt)],
+            cwd=get_project_root(),
+            env=os.environ.copy(),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        return AgentWorkerResult(
+            worker="claude_code",
+            enabled=True,
+            ok=False,
+            text=str(stdout).strip(),
+            error=(
+                str(stderr).strip()
+                or f"Claude Code worker 超时：{timeout_seconds} 秒"
+            ),
+        ).to_json()
     if completed.returncode != 0:
         return AgentWorkerResult(
             worker="claude_code",
@@ -161,7 +178,17 @@ class _MinimalAcpClient:
         self.update_kinds = []
         self.permission_decisions = []
 
-    async def session_update(self, update: Any, **kwargs: Any) -> None:
+    async def session_update(
+        self,
+        session_id: str | None = None,
+        update: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """收集 Codex worker 的消息流。"""
+
+        del session_id
+        if update is None:
+            update = kwargs.get("update")
         update_kind = str(getattr(update, "session_update", ""))
         self.update_kinds.append(update_kind)
         if update_kind != "agent_message_chunk":
@@ -231,6 +258,7 @@ class _MinimalAcpClient:
         return "".join(self.text_chunks).strip()
 
 
+@traceable(name="call_codex_worker_async", run_type="tool")
 async def _call_codex_worker_async(prompt: str) -> AgentWorkerResult:
     """通过 ACP 调用 Codex worker。"""
 
@@ -246,7 +274,10 @@ async def _call_codex_worker_async(prompt: str) -> AgentWorkerResult:
             error=f"缺少 acp Python SDK，无法按 reference/scripts 的 ACP 方式调用 Codex：{exc}",
         )
 
-    if not Path(NPX_COMMAND).is_file() and shutil.which(NPX_COMMAND, path=ACP_ENV.get("PATH")) is None:
+    if (
+        not Path(NPX_COMMAND).is_file()
+        and shutil.which(NPX_COMMAND, path=ACP_ENV.get("PATH")) is None
+    ):
         return AgentWorkerResult(
             worker="codex",
             enabled=True,
@@ -274,7 +305,10 @@ async def _call_codex_worker_async(prompt: str) -> AgentWorkerResult:
                 version="0.1.0",
             ),
         )
-        session = await connection.new_session(cwd=str(get_project_root()), mcp_servers=[])
+        session = await connection.new_session(
+            cwd=str(get_project_root()),
+            mcp_servers=[],
+        )
         client.begin_turn()
         response = await connection.prompt(
             prompt=[text_block(_compact_prompt(prompt))],
@@ -291,6 +325,7 @@ async def _call_codex_worker_async(prompt: str) -> AgentWorkerResult:
 
 
 @tool
+@traceable(name="call_codex_worker", run_type="tool")
 def call_codex_worker(prompt: str) -> str:
     """调用 Codex worker 处理复杂网页研究或策略迭代问题。"""
 
@@ -304,7 +339,20 @@ def call_codex_worker(prompt: str) -> str:
         ).to_json()
 
     try:
-        result = asyncio.run(_call_codex_worker_async(prompt))
+        result = asyncio.run(
+            asyncio.wait_for(
+                _call_codex_worker_async(prompt),
+                timeout=CODEX_WORKER_TIMEOUT_SECONDS,
+            )
+        )
+    except TimeoutError:
+        return AgentWorkerResult(
+            worker="codex",
+            enabled=True,
+            ok=False,
+            text="",
+            error=f"Codex worker 超时：{CODEX_WORKER_TIMEOUT_SECONDS} 秒",
+        ).to_json()
     except RuntimeError as exc:
         return AgentWorkerResult(
             worker="codex",

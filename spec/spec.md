@@ -61,8 +61,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 ```text
 用户输入研究主题
   -> input_guard
-  -> analyze_research_request
-  -> dispatch_search_tasks
+  -> plan_research
   -> 条件触发 web_search_sub_agent / local_document_search_tool / query_structured_data
   -> tool_output_sanitizer
   -> deduplicate_and_cluster
@@ -72,7 +71,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
   -> check_evidence_sufficiency
   -> 证据充足：generate_research_report
   -> 证据不足：check_step_budget
-        -> 预算充足：strategy_iteration -> dispatch_search_tasks
+        -> 预算充足：strategy_iteration -> plan_research
         -> 预算不足：prepare_degraded_report -> generate_research_report
   -> review_research_report
         -> Review 不通过且修正次数未耗尽：generate_research_report
@@ -87,8 +86,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | 节点 | 主要读取字段 | 主要写入字段 | 路由 / 边界 |
 |---|---|---|---|
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
-| `analyze_research_request` | `user_query`、预算默认值 | `research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值 | 真实 LLM 结构化输出节点；必须建立并校验 `question_id` 目录 |
-| `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps`、`search_dispatch_mode`、`search_iteration_context` | `previous_search_tasks`、`search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具；必须区分初次分发和策略迭代后的再次分发 |
+| `plan_research` | `user_query`、预算默认值、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：`research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值、首轮 `search_tasks`；迭代模式：下一轮 `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始规划 Prompt 或迭代检索 Prompt；根据 `search_tasks.source_type` 条件触发检索工具 |
 | `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为调用 `@tool` 包装的 Web Search SubAgent；SubAgent 内部由 `create_agent` 创建；内部可调用 Tavily MCP、Context7 MCP、替代网页工具、Claude Code worker 和 Codex worker；外部 worker 默认禁用，用于复杂问题和策略迭代 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH` | `local_document_results` | 已实现只读 Markdown 搜索工具；用于检索本地知识类、经验类、复盘类内容，不调用 LLM |
 | `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 已接入本地 SQLite 结构化 mock 搜索工具，查询 `data/mock/ai_products.sqlite` |
@@ -100,7 +98,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `build_evidence_matrix` | `evidence_items`、`sub_questions`、`hitl_decisions` | `evidence_matrix`、`entity_index.used_evidence_ids` | 必须通过 `question_id` 和 `evidence_id` 关联 |
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
 | `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
-| `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `dispatch_search_tasks`；通过 `search_dispatch_mode=iteration` 区分第一次分发 |
+| `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；通过 `planning_mode=iteration` 选择迭代检索 Prompt |
 | `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
@@ -121,7 +119,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
 - Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
-- `strategy_iteration` 回到 `dispatch_search_tasks` 前必须写入 `search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次检索任务分发区分。
+- `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"`、`search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成。
 - `review_research_report` 负责研究质量，不负责安全审查。
 - `safety_review` 负责安全边界，不负责研究质量评分。
@@ -335,7 +333,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - [ ] 静态编排图可以通过 `scripts/export_graph_mermaid.py` 保存到 `outputs/runs/researchops_graph.png`。
 - [ ] 每次运行到 `persist_outputs` 时，会静默保存实际运行链路 PNG 到 `outputs/runs/<run_id>_executed.png`，且不保存 `.mmd` 文件。
 - [ ] State 中不存在全局 `max_steps` 作为所有节点共享预算；检索、Review、安全分别独立计数。
-- [ ] `dispatch_search_tasks` 到三类检索工具是条件边。
+- [ ] `plan_research` 到三类检索工具是条件边。
 - [ ] 三类检索工具在图上汇合到 `tool_output_sanitizer`。
 - [ ] `web_search_sub_agent` 到 `tool_output_sanitizer` 之间存在 Web HITL 路由。
 - [ ] 证据不足先进入 `check_step_budget`，再决定 `strategy_iteration` 或 `prepare_degraded_report`。
