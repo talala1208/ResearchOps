@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -21,6 +22,36 @@ from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.tools.external_agent_workers import call_claude_code_worker, call_codex_worker
 from src.tools.online_mcp_tools import context7_mcp_query, tavily_mcp_search
+
+
+JSON_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(?P<body>.*?)\s*```$", re.DOTALL)
+
+
+def _strip_json_markdown_fence(raw_result: str) -> str:
+    """移除模型可能包裹的 Markdown JSON 代码块。"""
+
+    stripped = raw_result.strip()
+    match = JSON_FENCE_PATTERN.match(stripped)
+    if match is None:
+        return stripped
+    return match.group("body").strip()
+
+
+def _parse_json_object_from_model_output(raw_result: str) -> dict[str, Any]:
+    """解析 SubAgent 输出的 JSON 对象。
+
+    SubAgent Prompt 要求只输出 JSON，但部分模型会额外包一层
+    ```json 代码块。这里只兼容这种格式性包裹，不从自然语言中猜测 JSON。
+    """
+
+    normalized = _strip_json_markdown_fence(raw_result)
+    try:
+        parsed = json.loads(normalized)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Web Search SubAgent 未返回合法 JSON：{raw_result}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Web Search SubAgent 返回值必须是 JSON 对象")
+    return parsed
 
 
 @tool
@@ -135,13 +166,7 @@ def run_web_search_subagent_for_task(task: dict[str, Any]) -> dict[str, Any]:
     raw_result = web_search_subagent_tool.invoke(
         json.dumps(task, ensure_ascii=False)
     )
-    try:
-        parsed = json.loads(raw_result)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Web Search SubAgent 未返回合法 JSON：{raw_result}") from exc
-
-    if not isinstance(parsed, dict):
-        raise ValueError("Web Search SubAgent 返回值必须是 JSON 对象")
+    parsed = _parse_json_object_from_model_output(raw_result)
     if "results" not in parsed or not isinstance(parsed["results"], list):
         raise ValueError("Web Search SubAgent 返回值缺少 results 列表")
     if "web_hitl_required" not in parsed:

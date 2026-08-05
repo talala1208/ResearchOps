@@ -16,4 +16,5 @@ dependencies = [
     "openai>=2.32.0",
     "httpx[socks]>=0.28.1",
     "langchain-mcp-adapters>=0.1.0",
+    "agent-client-protocol>=0.12.0",
 ]

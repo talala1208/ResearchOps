@@ -5,8 +5,8 @@
 安全边界：
 - 默认不真实调用外部 Agent。
 - 必须显式设置环境变量启用。
-- Claude Code 通过本地 CLI 只传入 prompt，默认命令为 `claude --print`。
-- Codex 参考 `reference/scripts` 的 ACP 思路；当前若未安装 `acp` Python SDK 会显式返回不可用。
+- Claude Code 通过本地 CLI 只传入 prompt，并通过 `CLAUDE_CODE_ARGS` 控制允许工具。
+- Codex 参考 `reference/scripts` 的 ACP 思路，通过 `agent-client-protocol` 包提供的 `acp` Python SDK 调用。
 """
 
 from __future__ import annotations
@@ -32,7 +32,18 @@ if CODEX_BIN_DIR.is_dir():
     ACP_ENV["PATH"] = f"{CODEX_BIN_DIR}:{ACP_ENV.get('PATH', '')}"
 
 NPX_COMMAND = os.getenv("ACP_NPX_COMMAND", "npx")
-CODEX_ACP_PACKAGE = os.getenv("CODEX_ACP_PACKAGE", "@agentclientprotocol/codex-acp@1.1.0")
+CODEX_ACP_PACKAGE = os.getenv(
+    "CODEX_ACP_PACKAGE",
+    "@agentclientprotocol/codex-acp@1.1.0",
+)
+CODEX_WORKER_ALLOWED_TOOL_KINDS = {
+    item.strip()
+    for item in os.getenv(
+        "CODEX_WORKER_ALLOWED_TOOL_KINDS",
+        "search,fetch,think,other",
+    ).split(",")
+    if item.strip()
+}
 
 
 @dataclass(frozen=True)
@@ -91,7 +102,12 @@ def call_claude_code_worker(prompt: str) -> str:
         ).to_json()
 
     command = os.getenv("CLAUDE_CODE_COMMAND", "claude")
-    args = shlex.split(os.getenv("CLAUDE_CODE_ARGS", "--print"))
+    args = shlex.split(
+        os.getenv(
+            "CLAUDE_CODE_ARGS",
+            "--print --permission-mode auto --allowedTools WebFetch,WebSearch",
+        )
+    )
     timeout_seconds = int(os.getenv("CLAUDE_CODE_TIMEOUT_SECONDS", "60"))
     if shutil.which(command) is None and not Path(command).is_file():
         return AgentWorkerResult(
@@ -131,7 +147,8 @@ def call_claude_code_worker(prompt: str) -> str:
 class _MinimalAcpClient:
     """Codex ACP 最小 Client。
 
-    只收公开文本；拒绝权限、文件读写和命令类能力。
+    只收公开文本；按白名单允许搜索、网页抓取和思考类能力，
+    继续拒绝文件写入和本地命令执行类能力。
     """
 
     def __init__(self) -> None:
@@ -156,19 +173,52 @@ class _MinimalAcpClient:
         if text:
             self.text_chunks.append(str(text))
 
-    async def request_permission(self, options: list[Any], **kwargs: Any) -> Any:
-        from acp.schema import AllowedOutcome, PermissionOption, RequestPermissionResponse
+    async def request_permission(
+        self,
+        options: list[Any],
+        session_id: str | None = None,
+        tool_call: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """按允许的工具类型授予 Codex worker 一次性权限。"""
 
-        reject = PermissionOption(
-            option_id="reject",
-            name="Reject",
-            kind="reject",
-            outcome=AllowedOutcome(outcome="cancelled"),
+        from acp.schema import AllowedOutcome, DeniedOutcome, RequestPermissionResponse
+
+        del session_id
+        tool_call = tool_call or kwargs.get("tool_call")
+        tool_kind = str(getattr(tool_call, "kind", ""))
+        if tool_kind in CODEX_WORKER_ALLOWED_TOOL_KINDS:
+            allow_option = next(
+                (
+                    option
+                    for option in options
+                    if str(getattr(option, "kind", "")).startswith("allow")
+                ),
+                None,
+            )
+            if allow_option is not None:
+                option_id = str(getattr(allow_option, "option_id"))
+                self.permission_decisions.append(option_id)
+                return RequestPermissionResponse(
+                    outcome=AllowedOutcome(
+                        outcome="selected",
+                        option_id=option_id,
+                    )
+                )
+
+        reject_option = next(
+            (
+                option
+                for option in options
+                if str(getattr(option, "kind", "")).startswith("reject")
+            ),
+            None,
         )
-        self.permission_decisions.append(reject.option_id)
-        return RequestPermissionResponse(
-            outcome=AllowedOutcome(outcome="selected", option_id=reject.option_id)
-        )
+        if reject_option is not None:
+            self.permission_decisions.append(str(getattr(reject_option, "option_id")))
+        else:
+            self.permission_decisions.append("cancelled")
+        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
     async def write_text_file(self, **kwargs: Any) -> None:
         raise RuntimeError("Codex worker 未声明文件写入能力")
