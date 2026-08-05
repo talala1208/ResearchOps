@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+import operator
+from typing import Annotated, Literal, TypedDict
 
 
 SourceType = Literal[
@@ -284,5 +285,5 @@ class ResearchState(TypedDict, total=False):
     output_artifacts: dict[str, str]
 
     # 观测与指标
-    executed_nodes: list[str]
+    executed_nodes: Annotated[list[str], operator.add]
     evaluation_metrics: EvaluationMetrics

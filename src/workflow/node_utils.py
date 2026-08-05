@@ -8,9 +8,8 @@ from src.schemas.state import ResearchState
 def record_node(state: ResearchState, node_name: str) -> ResearchState:
     """记录节点执行痕迹，不参与任何预算控制。"""
 
-    executed_nodes = list(state.get("executed_nodes", []))
-    executed_nodes.append(node_name)
-    return {"executed_nodes": executed_nodes}
+    del state
+    return {"executed_nodes": [node_name]}
 
 
 def increase_search_step(state: ResearchState, node_name: str) -> ResearchState:

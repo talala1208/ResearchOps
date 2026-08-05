@@ -199,7 +199,7 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
     )
 
     return {
-        "executed_nodes": executed_nodes,
+        "executed_nodes": ["persist_outputs"],
         "final_report_path": str(report_path),
         "executed_mermaid": executed_mermaid,
         "executed_mermaid_png_path": executed_mermaid_png_path,

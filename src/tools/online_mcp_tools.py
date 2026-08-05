@@ -19,13 +19,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from functools import lru_cache
 from typing import Any
 
 from langchain.tools import tool
 
+from src.config import settings as _settings
+
 
 ONLINE_MCP_TIMEOUT_SECONDS = int(os.getenv("ONLINE_MCP_TIMEOUT_SECONDS", "30"))
+_ = _settings.PROJECT_ROOT
+CONTEXT7_LIBRARY_ID_PATTERN = re.compile(
+    r"Context7-compatible library ID:\s*(?P<library_id>/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
+)
 
 
 class MCPToolError(RuntimeError):
@@ -95,18 +102,19 @@ def _build_mcp_client():
         from langchain_mcp_adapters.client import MultiServerMCPClient
     except ImportError as exc:
         raise MCPToolError(
-            "缺少 langchain-mcp-adapters，无法使用 Online MCP；"
-            "请先安装依赖 langchain-mcp-adapters。"
+            "无法导入 langchain-mcp-adapters.client.MultiServerMCPClient；"
+            "请检查 langchain-mcp-adapters 与 mcp 包版本是否兼容。"
+            f"原始错误：{exc}"
         ) from exc
 
     return MultiServerMCPClient(_build_mcp_config())
 
 
-async def _get_online_mcp_tools() -> list[Any]:
+async def _get_online_mcp_tools(server_name: str | None = None) -> list[Any]:
     """获取 Online MCP tools。"""
 
     client = _build_mcp_client()
-    return await client.get_tools()
+    return await client.get_tools(server_name=server_name)
 
 
 def _tool_name(tool_obj: Any) -> str:
@@ -171,7 +179,7 @@ async def _invoke_tool_with_candidate_payloads(
 async def _tavily_search_async(query: str, max_results: int) -> Any:
     """调用 Tavily MCP 搜索。"""
 
-    tools = await _get_online_mcp_tools()
+    tools = await _get_online_mcp_tools(server_name="tavily-remote-mcp")
     tavily_tool = _select_tool(tools, ("tavily", "search"))
     return await _invoke_tool_with_candidate_payloads(
         tavily_tool,
@@ -187,37 +195,44 @@ async def _tavily_search_async(query: str, max_results: int) -> Any:
 async def _context7_query_async(topic: str) -> Any:
     """调用 Context7 MCP 查询官方文档。"""
 
-    tools = await _get_online_mcp_tools()
-    context7_tools = [tool_obj for tool_obj in tools if "context7" in _tool_name(tool_obj).lower()]
-    if not context7_tools:
+    candidate_tools = await _get_online_mcp_tools(server_name="context7")
+    if not candidate_tools:
         raise MCPToolError("Context7 MCP 未配置或未暴露工具，请检查 CONTEXT7_API_KEY")
-    candidate_tools = context7_tools
 
-    # 优先 query / docs 类工具；如果服务只暴露 resolve 工具，也会显式返回其结果。
-    preferred = None
-    for tool_obj in candidate_tools:
-        name = _tool_name(tool_obj).lower()
-        if "query" in name or "docs" in name or "documentation" in name:
-            preferred = tool_obj
-            break
-    if preferred is None:
-        preferred = _select_tool(candidate_tools, ("context7",))
-
-    return await _invoke_tool_with_candidate_payloads(
-        preferred,
+    resolve_tool = _select_tool(candidate_tools, ("resolve",))
+    query_docs_tool = _try_select_tool(
+        candidate_tools,
+        [("query", "docs"), ("docs",)],
+    )
+    resolve_result = await _invoke_tool_with_candidate_payloads(
+        resolve_tool,
         [
-            {"query": topic},
-            {"topic": topic},
             {"libraryName": topic, "query": topic},
-            {"libraryId": topic, "query": topic},
         ],
     )
+    resolve_text = str(resolve_result)
+    match = CONTEXT7_LIBRARY_ID_PATTERN.search(resolve_text)
+    if match is None:
+        raise MCPToolError(f"Context7 未解析出 libraryId：{resolve_text[:1000]}")
+
+    library_id = match.group("library_id")
+    docs_result = await _invoke_tool_with_candidate_payloads(
+        query_docs_tool,
+        [
+            {"libraryId": library_id, "query": topic},
+        ],
+    )
+    return {
+        "library_id": library_id,
+        "resolve_result": str(resolve_result),
+        "docs_result": str(docs_result),
+    }
 
 
 async def _playwright_fetch_page_async(url: str) -> Any:
     """调用 Playwright MCP 读取页面快照。"""
 
-    tools = await _get_online_mcp_tools()
+    tools = await _get_online_mcp_tools(server_name="playwright")
     playwright_tools = _filter_tools_by_name(tools, ("playwright", "browser"))
     navigate_tool = _try_select_tool(
         playwright_tools,
@@ -251,7 +266,7 @@ async def _playwright_fetch_page_async(url: str) -> Any:
 async def _devtools_inspect_page_async(url: str) -> Any:
     """调用 Chrome DevTools MCP 检查页面状态。"""
 
-    tools = await _get_online_mcp_tools()
+    tools = await _get_online_mcp_tools(server_name="devtools")
     devtools_tools = _filter_tools_by_name(tools, ("devtools", "chrome", "page"))
     navigate_tool = _try_select_tool(
         devtools_tools,

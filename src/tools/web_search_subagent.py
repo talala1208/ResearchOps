@@ -14,8 +14,8 @@ import re
 from typing import Any
 
 from langchain.tools import tool
-from langchain_community.agent_toolkits.load_tools import load_tools
 from langsmith import traceable
+from serpapi import GoogleSearch
 
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
@@ -80,12 +80,47 @@ def _parse_json_object_from_model_output(raw_result: str) -> dict[str, Any]:
 def serp_api_search(query: str) -> str:
     """通过 SerpAPI 搜索网页资料。"""
 
-    serpapi_tool = load_tools(["serpapi"])[0]
-    result = serpapi_tool.invoke(query)
+    api_key = os.getenv("SERPAPI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("缺少 SERPAPI_API_KEY，无法调用 SerpAPI。")
+
+    search = GoogleSearch(
+        {
+            "engine": "google",
+            "q": query,
+            "api_key": api_key,
+            "num": 5,
+            "hl": "zh-cn",
+        }
+    )
+    payload = search.get_dict()
+    if payload.get("error"):
+        raise RuntimeError(f"SerpAPI 调用失败：{payload['error']}")
+
+    results = []
+    for item in payload.get("organic_results", []):
+        link = item.get("link")
+        results.append(
+            {
+                "title": item.get("title"),
+                "url": link,
+                "snippet": item.get("snippet"),
+                "source": item.get("source") or item.get("displayed_link"),
+                "published_at": item.get("date"),
+                "position": item.get("position"),
+            }
+        )
+
     return json.dumps(
         {
             "provider": "serpapi",
-            "raw_result": result,
+            "ok": True,
+            "query": query,
+            "results": results,
+            "search_metadata": {
+                "id": payload.get("search_metadata", {}).get("id"),
+                "status": payload.get("search_metadata", {}).get("status"),
+            },
         },
         ensure_ascii=False,
     )
@@ -217,16 +252,17 @@ def _fallback_result_from_tool_outputs(
         if tool_output["tool_name"] != "serp_api_search" or not tool_output.get("ok"):
             continue
         output = tool_output.get("output")
-        raw_result = output.get("raw_result") if isinstance(output, dict) else output
-        if raw_result:
+        serp_results = output.get("results") if isinstance(output, dict) else []
+        if serp_results:
+            first_result = serp_results[0]
             return {
                 "results": [
                     {
-                        "title": f"SerpAPI 搜索摘要：{task['query']}",
-                        "url_or_path": f"serpapi://search/{task['task_id']}",
-                        "snippet": str(raw_result)[:1000],
+                        "title": first_result.get("title") or f"SerpAPI 搜索结果：{task['query']}",
+                        "url_or_path": first_result.get("url") or f"serpapi://search/{task['task_id']}",
+                        "snippet": first_result.get("snippet") or "",
                         "source_name": "serpapi",
-                        "published_at": None,
+                        "published_at": first_result.get("published_at"),
                         "requires_login": False,
                         "blocked_reason": None,
                     }

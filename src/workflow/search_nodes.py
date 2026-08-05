@@ -115,6 +115,7 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
             )
 
     return {
+        **record_node(state, "web_search_sub_agent"),
         "web_search_results": results,
         "web_hitl_required": web_hitl_required,
         "web_hitl_reason": web_hitl_reason,
@@ -144,6 +145,7 @@ def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
     ]
 
     return {
+        **record_node(state, "web_search_hitl_request"),
         "web_hitl_decisions": decisions,
         "web_hitl_required": False,
     }
@@ -179,7 +181,10 @@ def local_document_search_tool(state: ResearchState) -> dict[str, Any]:
             ]
         results.extend(task_results)
 
-    return {"local_document_results": results}
+    return {
+        **record_node(state, "local_document_search_tool"),
+        "local_document_results": results,
+    }
 
 
 def query_structured_data(state: ResearchState) -> dict[str, Any]:
@@ -213,7 +218,10 @@ def query_structured_data(state: ResearchState) -> dict[str, Any]:
             }
         )
 
-    return {"structured_data_results": results}
+    return {
+        **record_node(state, "query_structured_data"),
+        "structured_data_results": results,
+    }
 
 
 def tool_output_sanitizer(state: ResearchState) -> dict[str, Any]:

@@ -16,7 +16,9 @@ import json
 import os
 import shlex
 import shutil
+import select
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -90,6 +92,121 @@ def _compact_prompt(prompt: str, limit: int = 4000) -> str:
     return normalized[:limit] + "\n...(已截断)"
 
 
+def _normalize_claude_args(args: list[str]) -> list[str]:
+    """规范化 Claude CLI 参数，避免可变参数吞掉 prompt。"""
+
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        item = args[index]
+        if item in {"--allowedTools", "--allowed-tools"} and index + 1 < len(args):
+            normalized.append(f"{item}={args[index + 1]}")
+            index += 2
+            continue
+        normalized.append(item)
+        index += 1
+    return normalized
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """终止外部 worker 进程。"""
+
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def _run_claude_code_command(
+    command: str,
+    args: list[str],
+    prompt: str,
+    timeout_seconds: int,
+    idle_timeout_seconds: float,
+) -> AgentWorkerResult:
+    """运行 Claude Code CLI，并在收到稳定输出后结束等待。"""
+
+    completed_prompt = _compact_prompt(prompt)
+    process = subprocess.Popen(
+        [command, *args, completed_prompt],
+        cwd=get_project_root(),
+        env=os.environ.copy(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    start_time = time.monotonic()
+    last_output_time: float | None = None
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    streams = [process.stdout, process.stderr]
+    while True:
+        now = time.monotonic()
+        if process.poll() is not None:
+            break
+        if now - start_time >= timeout_seconds:
+            _terminate_process(process)
+            return AgentWorkerResult(
+                worker="claude_code",
+                enabled=True,
+                ok=bool("".join(stdout_parts).strip()),
+                text="".join(stdout_parts).strip(),
+                error="".join(stderr_parts).strip()
+                or f"Claude Code worker 超时：{timeout_seconds} 秒",
+            )
+        if (
+            last_output_time is not None
+            and stdout_parts
+            and now - last_output_time >= idle_timeout_seconds
+        ):
+            _terminate_process(process)
+            return AgentWorkerResult(
+                worker="claude_code",
+                enabled=True,
+                ok=True,
+                text="".join(stdout_parts).strip(),
+                error="".join(stderr_parts).strip() or None,
+            )
+
+        readable, _, _ = select.select(streams, [], [], 0.5)
+        for stream in readable:
+            chunk = stream.readline()
+            if not chunk:
+                continue
+            if stream is process.stdout:
+                stdout_parts.append(chunk)
+            else:
+                stderr_parts.append(chunk)
+            last_output_time = time.monotonic()
+
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    remaining_stdout, remaining_stderr = process.communicate(timeout=1)
+    stdout += remaining_stdout
+    stderr += remaining_stderr
+    if process.returncode != 0:
+        return AgentWorkerResult(
+            worker="claude_code",
+            enabled=True,
+            ok=False,
+            text=stdout.strip(),
+            error=stderr.strip() or f"Claude Code 退出码：{process.returncode}",
+        )
+    return AgentWorkerResult(
+        worker="claude_code",
+        enabled=True,
+        ok=bool(stdout.strip()),
+        text=stdout.strip(),
+        error=stderr.strip() or None,
+    )
+
+
 @tool
 def call_claude_code_worker(prompt: str) -> str:
     """调用 Claude Code worker 处理复杂网页研究或策略迭代问题。"""
@@ -104,13 +221,16 @@ def call_claude_code_worker(prompt: str) -> str:
         ).to_json()
 
     command = os.getenv("CLAUDE_CODE_COMMAND", "claude")
-    args = shlex.split(
-        os.getenv(
-            "CLAUDE_CODE_ARGS",
-            "--print --permission-mode auto --allowedTools WebFetch,WebSearch",
+    args = _normalize_claude_args(
+        shlex.split(
+            os.getenv(
+                "CLAUDE_CODE_ARGS",
+                "--print --permission-mode auto --allowedTools=WebFetch,WebSearch",
+            )
         )
     )
     timeout_seconds = int(os.getenv("CLAUDE_CODE_TIMEOUT_SECONDS", "60"))
+    idle_timeout_seconds = float(os.getenv("CLAUDE_CODE_IDLE_TIMEOUT_SECONDS", "5"))
     if shutil.which(command) is None and not Path(command).is_file():
         return AgentWorkerResult(
             worker="claude_code",
@@ -121,43 +241,22 @@ def call_claude_code_worker(prompt: str) -> str:
         ).to_json()
 
     try:
-        completed = subprocess.run(
-            [command, *args, _compact_prompt(prompt)],
-            cwd=get_project_root(),
-            env=os.environ.copy(),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
+        result = _run_claude_code_command(
+            command=command,
+            args=args,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            idle_timeout_seconds=idle_timeout_seconds,
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+    except Exception as exc:  # noqa: BLE001 - 外部 CLI 错误要显式返回
         return AgentWorkerResult(
             worker="claude_code",
             enabled=True,
             ok=False,
-            text=str(stdout).strip(),
-            error=(
-                str(stderr).strip()
-                or f"Claude Code worker 超时：{timeout_seconds} 秒"
-            ),
+            text="",
+            error=f"Claude Code worker 调用失败：{exc}",
         ).to_json()
-    if completed.returncode != 0:
-        return AgentWorkerResult(
-            worker="claude_code",
-            enabled=True,
-            ok=False,
-            text=completed.stdout.strip(),
-            error=completed.stderr.strip() or f"Claude Code 退出码：{completed.returncode}",
-        ).to_json()
-
-    return AgentWorkerResult(
-        worker="claude_code",
-        enabled=True,
-        ok=True,
-        text=completed.stdout.strip(),
-    ).to_json()
+    return result.to_json()
 
 
 class _MinimalAcpClient:

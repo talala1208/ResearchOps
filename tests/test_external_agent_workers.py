@@ -9,14 +9,28 @@ from unittest.mock import patch
 
 from acp.schema import PermissionOption
 
-from src.tools.external_agent_workers import _MinimalAcpClient, call_claude_code_worker
+from src.tools.external_agent_workers import (
+    AgentWorkerResult,
+    _MinimalAcpClient,
+    _normalize_claude_args,
+    call_claude_code_worker,
+)
 
 
 class ClaudeCodeWorkerTest(unittest.TestCase):
     """验证 Claude Code worker 调用边界。"""
 
-    def test_claude_code_worker_returns_timeout_error(self) -> None:
-        """Claude Code worker 超时时返回结构化错误，而不是阻塞主流程。"""
+    def test_normalize_allowed_tools_does_not_swallow_prompt(self) -> None:
+        """Claude 可变参数不能吞掉最终 prompt。"""
+
+        args = _normalize_claude_args(
+            ["--print", "--allowedTools", "WebFetch,WebSearch"]
+        )
+
+        self.assertEqual(args, ["--print", "--allowedTools=WebFetch,WebSearch"])
+
+    def test_claude_code_worker_returns_runner_result(self) -> None:
+        """Claude Code worker 返回底层 runner 的结构化结果。"""
 
         with (
             patch.dict(
@@ -31,17 +45,19 @@ class ClaudeCodeWorkerTest(unittest.TestCase):
                 clear=False,
             ),
             patch("shutil.which", return_value="/usr/local/bin/claude"),
-            patch("subprocess.run") as run_mock,
+            patch(
+                "src.tools.external_agent_workers._run_claude_code_command",
+                return_value=AgentWorkerResult(
+                    worker="claude_code",
+                    enabled=True,
+                    ok=True,
+                    text="WORKER_OK",
+                ),
+            ),
         ):
-            import subprocess
-
-            run_mock.side_effect = subprocess.TimeoutExpired(
-                cmd="claude",
-                timeout=1,
-            )
             result_json = call_claude_code_worker.invoke("测试")
 
-        self.assertIn("Claude Code worker 超时：1 秒", result_json)
+        self.assertIn("WORKER_OK", result_json)
 
 
 class CodexWorkerPermissionTest(unittest.TestCase):
