@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from src.config.settings import get_workflow_config
 from src.schemas.state import ResearchState
 
 
@@ -126,9 +127,12 @@ def route_after_review(state: ResearchState) -> str:
     这里保留条件路由，避免失败时同时进入修正和安全审查两个分支。
     """
 
+    workflow_config = get_workflow_config()
     review_result = state.get("review_result", {})
     review_revision_count = state.get("review_revision_count", 0)
-    max_review_revisions = state.get("max_review_revisions", 1)
+    max_review_revisions = state.get(
+        "max_review_revisions", workflow_config.max_review_revisions
+    )
 
     if (
         review_result.get("passed") is False
@@ -141,9 +145,12 @@ def route_after_review(state: ResearchState) -> str:
 def route_after_safety_review(state: ResearchState) -> str:
     """安全审查后的路由。"""
 
+    workflow_config = get_workflow_config()
     safety_result = state.get("safety_review_result", {})
     safety_revision_count = state.get("safety_revision_count", 0)
-    max_safety_revisions = state.get("max_safety_revisions", 1)
+    max_safety_revisions = state.get(
+        "max_safety_revisions", workflow_config.max_safety_revisions
+    )
     safety_failed = (
         safety_result.get("safety_pass") is False
         or safety_result.get("downgrade_required") is True

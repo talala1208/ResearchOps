@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.config.settings import get_workflow_config
 from src.schemas.state import ResearchState
 from src.workflow.node_utils import record_node
 
-
-REVIEW_PASS_SCORE = 0.75
 
 
 def _format_list(items: list[str]) -> str:
@@ -203,6 +202,9 @@ def generate_research_report(state: ResearchState) -> dict[str, Any]:
 def review_research_report(state: ResearchState) -> dict[str, Any]:
     """对研究报告做确定性质量 Review。"""
 
+    workflow_config = get_workflow_config()
+    review_pass_score = workflow_config.review_pass_score
+
     report_draft = state["report_draft"]
     evidence_sufficiency_result = state.get("evidence_sufficiency_result", {})
     evidence_items = state.get("evidence_items", {})
@@ -225,12 +227,12 @@ def review_research_report(state: ResearchState) -> dict[str, Any]:
     revision_suggestions = []
     if citation_completeness_score < 1.0:
         revision_suggestions.append("报告缺少可引用证据，需要补充 evidence_id 引用。")
-    if source_coverage_score < REVIEW_PASS_SCORE:
+    if source_coverage_score < review_pass_score:
         revision_suggestions.append("证据覆盖不足，需要补充高优先级子问题的证据。")
     if boundary_score < 1.0:
         revision_suggestions.append("报告需要补充不确定性与边界说明。")
 
-    passed = report_score >= REVIEW_PASS_SCORE or degraded
+    passed = report_score >= review_pass_score or degraded
 
     return {
         **record_node(state, "review_research_report"),

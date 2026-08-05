@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from src.config.settings import get_workflow_config
 from src.schemas.state import ResearchState
 from src.workflow.node_utils import record_node
 
@@ -16,7 +17,6 @@ PRIORITY_WEIGHT = {
 }
 HIGH_QUALITY_RELIABILITY_THRESHOLD = 0.7
 EVIDENCE_SUFFICIENCY_THRESHOLD = 0.75
-HITL_CONFLICT_THRESHOLD = 9.0
 SOURCE_AUTHORITY_SCORE = {
     "official_docs": 0.95,
     "pricing_page": 0.9,
@@ -118,6 +118,7 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
     }
     evidence_counter = 1
     conflict_counter = 1
+    workflow_config = get_workflow_config()
 
     for cluster in state.get("evidence_clusters", []):
         question_id = cluster["question_id"]
@@ -164,7 +165,7 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
                 "conflict_summary": "替代规则：同一子问题存在多个来源类型，后续真实实现需判断是否语义冲突。",
                 "preferred_evidence_id": related_evidence_ids[0] if related_evidence_ids else None,
                 "hitl_need_score": hitl_need_score,
-                "hitl_triggered": hitl_need_score > HITL_CONFLICT_THRESHOLD,
+                "hitl_triggered": hitl_need_score > workflow_config.hitl_conflict_threshold,
             }
             conflict_ids_by_question_id[question_id].append(conflict_id)
 
@@ -398,8 +399,9 @@ def check_step_budget(state: ResearchState) -> dict[str, Any]:
     写入：`step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`
     """
 
+    workflow_config = get_workflow_config()
     search_steps = state.get("search_steps", 0)
-    max_search_steps = state.get("max_search_steps", 3)
+    max_search_steps = state.get("max_search_steps", workflow_config.max_search_steps)
     search_budget_remaining = max(max_search_steps - search_steps, 0)
     insufficient_question_ids = state["insufficient_question_ids"]
     step_budget_exhausted = search_budget_remaining <= 0

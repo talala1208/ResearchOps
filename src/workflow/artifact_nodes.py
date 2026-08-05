@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.runnables.graph_mermaid import draw_mermaid_png
 
-from src.config.settings import get_project_root
+from src.config.settings import get_project_root, get_workflow_config
 from src.schemas.state import ResearchState
 
 
@@ -160,6 +160,7 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         executed_nodes=executed_nodes,
     )
 
+    workflow_config = get_workflow_config()
     source_contribution = _source_contribution(state)
     web_hitl_trigger_count_by_source = {
         "web_search": len(state.get("web_hitl_decisions", [])),
@@ -169,11 +170,17 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         "total_steps": len(executed_nodes),
         "executed_nodes": executed_nodes,
         "search_steps": state.get("search_steps", 0),
-        "max_search_steps": state.get("max_search_steps", 3),
+        "max_search_steps": state.get(
+            "max_search_steps", workflow_config.max_search_steps
+        ),
         "review_revision_count": state.get("review_revision_count", 0),
-        "max_review_revisions": state.get("max_review_revisions", 1),
+        "max_review_revisions": state.get(
+            "max_review_revisions", workflow_config.max_review_revisions
+        ),
         "safety_revision_count": state.get("safety_revision_count", 0),
-        "max_safety_revisions": state.get("max_safety_revisions", 1),
+        "max_safety_revisions": state.get(
+            "max_safety_revisions", workflow_config.max_safety_revisions
+        ),
         "total_latency_ms": 0,
         "total_tokens": 0,
         "evidence_count": len(state.get("evidence_items", {})),

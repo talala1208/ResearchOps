@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.config.settings import get_workflow_config
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import ResearchPlanOutput, SearchTaskPlanOutput
@@ -102,6 +103,7 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
         item.question_id: item.model_dump() for item in plan.minimum_evidence_standard
     }
     question_ids = list(sub_questions.keys())
+    workflow_config = get_workflow_config()
 
     return {
         **record_node(state, "analyze_research_request"),
@@ -123,11 +125,17 @@ def analyze_research_request(state: ResearchState) -> dict[str, Any]:
         "search_attempt": 1,
         "search_iteration_context": {},
         "search_steps": state.get("search_steps", 0),
-        "max_search_steps": state.get("max_search_steps", 3),
+        "max_search_steps": state.get(
+            "max_search_steps", workflow_config.max_search_steps
+        ),
         "review_revision_count": state.get("review_revision_count", 0),
-        "max_review_revisions": state.get("max_review_revisions", 1),
+        "max_review_revisions": state.get(
+            "max_review_revisions", workflow_config.max_review_revisions
+        ),
         "safety_revision_count": state.get("safety_revision_count", 0),
-        "max_safety_revisions": state.get("max_safety_revisions", 1),
+        "max_safety_revisions": state.get(
+            "max_safety_revisions", workflow_config.max_safety_revisions
+        ),
     }
 
 

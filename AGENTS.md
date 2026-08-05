@@ -26,7 +26,7 @@
 | `src/llm/` | 模型初始化、Prompt 加载、结构化输出封装 |
 | `src/tools/` | Web、本地文档、结构化数据等只读工具 |
 | `src/evaluators/` | LangSmith evaluator 或本地评估逻辑 |
-| `src/artifacts/` | 报告、metrics、实际运行 Mermaid / PNG 等本地产物保存逻辑 |
+| `src/artifacts/` | 报告、metrics、实际运行链路 PNG 等本地产物保存逻辑 |
 | `src/config/` | 环境变量、路径、模型、权限配置读取与校验 |
 | `prompts/` | Prompt YAML 文件 |
 | `outputs/` | 运行产物，不作为源码维护 |
@@ -83,16 +83,16 @@
 ## 输出产物
 
 - 静态编排图由 `scripts/export_graph_mermaid.py` 生成到 `outputs/runs/researchops_graph.png`。
-- 实际运行 Mermaid / PNG 应由后台静默保存，不放入主 Graph 编排节点。
+- 实际运行链路 PNG 应由后台静默保存，不放入主 Graph 编排节点；不需要保存 `.mmd` 文件。
 - 后续实际运行产物建议使用 `run_id` 或时间戳，避免覆盖已有文件：
   - `outputs/reports/<run_id>.md`
-  - `outputs/runs/<run_id>_executed.mmd`
   - `outputs/runs/<run_id>_executed.png`
   - `outputs/runs/<run_id>_metrics.json`
 
 ## 测试与验证
 
 - 当前阶段默认运行相关 smoke / 单元测试，不默认跑完整测试套件。
+- 新增 smoke 验证时必须落到 `tests/` 目录，避免只写一次性临时命令。
 - Graph 编排或 State 变化后，至少验证：
   - `src.workflow.graph.graph` 可导入
   - `graph.invoke(...)` 可运行

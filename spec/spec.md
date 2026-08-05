@@ -105,7 +105,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行 Mermaid 和 PNG 静默保存；只写 `outputs/` 下新文件 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
 ### 关键状态与边界
 
@@ -125,7 +125,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - `generate_research_report` 负责普通报告和降级报告正文生成。
 - `review_research_report` 负责研究质量，不负责安全审查。
 - `safety_review` 负责安全边界，不负责研究质量评分。
-- 后台实际运行 Mermaid / PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点，避免污染业务流程。
+- 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点，避免污染业务流程；不需要保存 `.mmd` 文件。
 
 ### 预算控制
 
@@ -158,7 +158,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 | `src/llm` | 模型初始化、结构化输出、Prompt 加载调用 | `src/config`、`prompts` | 业务流程路由决策散落在此处 |
 | `src/tools` | Web、本地文档、结构化数据、Claude Code / Codex worker 封装等工具 | `src/config`、外部只读 API、本地受限 CLI | 外部写入、绕过权限墙 |
 | `src/evaluators` | LangSmith evaluator 或本地评估逻辑 | `src/schemas`、LLM 接口 | 修改业务 State 的主流程字段 |
-| `src/artifacts` | 报告、指标、Mermaid / PNG 等产物保存 | `src/schemas`、文件系统 outputs | 覆盖用户文件、写项目外路径 |
+| `src/artifacts` | 报告、指标、运行链路 PNG 等产物保存 | `src/schemas`、文件系统 outputs | 覆盖用户文件、写项目外路径 |
 | `src/config` | 环境变量、路径、模型和权限配置 | `.env`、标准库 | 静默吞掉缺失必要配置 |
 | `scripts` | 一次性手动运行脚本 | 项目模块 | 承担核心业务逻辑 |
 
@@ -245,7 +245,6 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - 结构化 mock 种子数据：`data/mock/ai_products.json`
   - 结构化 mock 数据库：`data/mock/ai_products.sqlite`
   - 报告 Markdown：`outputs/reports/<run_id>.md`
-  - 实际运行 Mermaid：`outputs/runs/<run_id>_executed.mmd`
   - 实际运行 PNG：`outputs/runs/<run_id>_executed.png`
   - 运行指标 JSON：`outputs/runs/<run_id>_metrics.json`
   - 静态编排图 PNG：`outputs/runs/researchops_graph.png`
@@ -257,9 +256,15 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 ### 配置
 
-- 配置来源优先级：显式函数参数 > 环境变量 > 项目默认配置。
-- API Key、模型名、LangSmith 配置、搜索服务配置、本地文档根路径和输出路径应由 `.env` 或 `src/config` 管理。
+- 配置来源优先级：显式 State 入参 > 环境变量。缺少必需环境变量时必须显式失败。
+- API Key、模型名、LangSmith 配置、搜索服务配置、本地文档根路径、检索/Review/安全预算和质量阈值应由 `.env` 或 `src/config` 管理。
 - 本地 Markdown 搜索根路径由 `LOCAL_DOCUMENTS_BASE_PATH` 管理；工具只能读取该目录下 `.md` 文件。
+- 工作流预算与阈值由以下环境变量管理：
+  - `MAX_SEARCH_STEPS`
+  - `MAX_REVIEW_REVISIONS`
+  - `MAX_SAFETY_REVISIONS`
+  - `HITL_CONFLICT_THRESHOLD`
+  - `REVIEW_PASS_SCORE`
 - Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；密钥不得写入代码或 SPEC。
 - 缺少必要配置时必须显式失败，不得静默切换到不安全默认值或伪造数据。
 
@@ -328,7 +333,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 - [ ] Graph 可以从 `src.workflow.graph.graph` 导入并成功 invoke。
 - [ ] 静态编排图可以通过 `scripts/export_graph_mermaid.py` 保存到 `outputs/runs/researchops_graph.png`。
-- [ ] 每次运行到 `persist_outputs` 时，会静默保存实际运行链路 Mermaid 到 `outputs/runs/<run_id>_executed.mmd`，并保存 PNG 到 `outputs/runs/<run_id>_executed.png`。
+- [ ] 每次运行到 `persist_outputs` 时，会静默保存实际运行链路 PNG 到 `outputs/runs/<run_id>_executed.png`，且不保存 `.mmd` 文件。
 - [ ] State 中不存在全局 `max_steps` 作为所有节点共享预算；检索、Review、安全分别独立计数。
 - [ ] `dispatch_search_tasks` 到三类检索工具是条件边。
 - [ ] 三类检索工具在图上汇合到 `tool_output_sanitizer`。
