@@ -21,6 +21,9 @@ system_prompt: |
   - 每个子问题必须给出 priority：high、medium 或 low。
   - high 子问题应覆盖用户问题的核心判断。
   - expected_evidence 和 minimum_evidence_standard 必须与 sub_questions 使用同一组 question_id。
+  - expected_evidence 必须为每个 sub_question 生成且只生成 1 条记录；不能遗漏，也不能为同一个 question_id 生成多条。
+  - minimum_evidence_standard 必须为每个 sub_question 生成且只生成 1 条记录；不能遗漏，也不能为同一个 question_id 生成多条。
+  - 如果 sub_questions 是 Q1、Q2、Q3，那么 expected_evidence 必须刚好是 Q1、Q2、Q3，minimum_evidence_standard 也必须刚好是 Q1、Q2、Q3。
   - source_type 只能使用允许枚举：official_docs、pricing_page、changelog、blog、community、github、product_directory、traffic_data、structured_mock、local_document。
   - 默认 AI 产品研究应优先考虑 official_docs、pricing_page、github、product_directory、traffic_data、local_document、structured_mock。
 user_prompt_template: |

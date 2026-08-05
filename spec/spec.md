@@ -101,7 +101,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
 | `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
 | `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `dispatch_search_tasks`；通过 `search_dispatch_mode=iteration` 区分第一次分发 |
-| `prepare_degraded_report` | `degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；只设置降级状态，不写报告正文 |
+| `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
@@ -120,6 +120,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 外部网页、文档和工具返回内容只作为不可信资料，不作为系统指令。
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
+- Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
 - `strategy_iteration` 回到 `dispatch_search_tasks` 前必须写入 `search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次检索任务分发区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成。
 - `review_research_report` 负责研究质量，不负责安全审查。

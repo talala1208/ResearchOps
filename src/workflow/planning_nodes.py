@@ -23,16 +23,38 @@ def _validate_research_plan(plan: ResearchPlanOutput) -> None:
 
     question_ids = [item.question_id for item in plan.sub_questions]
     if len(question_ids) != len(set(question_ids)):
-        raise ValueError("研究计划中存在重复 question_id")
+        raise ValueError(f"研究计划中存在重复 question_id：{question_ids}")
+
+    expected_ids = [item.question_id for item in plan.expected_evidence]
+    if len(expected_ids) != len(set(expected_ids)):
+        raise ValueError(f"expected_evidence 中存在重复 question_id：{expected_ids}")
+
+    standard_ids = [item.question_id for item in plan.minimum_evidence_standard]
+    if len(standard_ids) != len(set(standard_ids)):
+        raise ValueError(f"minimum_evidence_standard 中存在重复 question_id：{standard_ids}")
 
     question_id_set = set(question_ids)
-    expected_ids = {item.question_id for item in plan.expected_evidence}
-    standard_ids = {item.question_id for item in plan.minimum_evidence_standard}
+    expected_id_set = set(expected_ids)
+    standard_id_set = set(standard_ids)
 
-    if expected_ids != question_id_set:
-        raise ValueError("expected_evidence 的 question_id 必须与 sub_questions 完全一致")
-    if standard_ids != question_id_set:
-        raise ValueError("minimum_evidence_standard 的 question_id 必须与 sub_questions 完全一致")
+    if expected_id_set != question_id_set:
+        missing = sorted(question_id_set - expected_id_set)
+        extra = sorted(expected_id_set - question_id_set)
+        raise ValueError(
+            "expected_evidence 的 question_id 必须与 sub_questions 完全一致；"
+            f"sub_questions={sorted(question_id_set)}；"
+            f"expected_evidence={sorted(expected_id_set)}；"
+            f"missing={missing}；extra={extra}"
+        )
+    if standard_id_set != question_id_set:
+        missing = sorted(question_id_set - standard_id_set)
+        extra = sorted(standard_id_set - question_id_set)
+        raise ValueError(
+            "minimum_evidence_standard 的 question_id 必须与 sub_questions 完全一致；"
+            f"sub_questions={sorted(question_id_set)}；"
+            f"minimum_evidence_standard={sorted(standard_id_set)}；"
+            f"missing={missing}；extra={extra}"
+        )
 
 
 def _validate_search_tasks(state: ResearchState, task_plan: SearchTaskPlanOutput) -> None:

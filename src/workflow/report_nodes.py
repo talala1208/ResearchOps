@@ -73,12 +73,27 @@ def prepare_degraded_report(state: ResearchState) -> dict[str, Any]:
     该节点只负责设置降级状态，不负责判断预算，也不负责写报告正文。
     """
 
+    input_guard_result = state.get("input_guard_result", {})
     safety_result = state.get("safety_review_result", {})
     safety_revision_count = state.get("safety_revision_count", 0)
     if safety_result and safety_result.get("safety_pass") is False:
         safety_revision_count += 1
 
+    input_guard_reason = None
+    if input_guard_result:
+        detected_risks = input_guard_result.get("detected_risks", [])
+        if input_guard_result.get("downgrade_reason"):
+            input_guard_reason = input_guard_result["downgrade_reason"]
+        elif input_guard_result.get("safety_pass") is False:
+            input_guard_reason = "输入安全检查未通过"
+        elif input_guard_result.get("downgrade_required") is True:
+            input_guard_reason = "输入安全检查要求降级输出"
+
+        if input_guard_reason and detected_risks:
+            input_guard_reason = f"{input_guard_reason}；风险标签：{', '.join(detected_risks)}"
+
     reason_candidates = [
+        input_guard_reason,
         state.get("step_budget_reason"),
         state.get("degradation_reason"),
         state.get("evidence_sufficiency_result", {}).get("degradation_reason"),
@@ -115,9 +130,20 @@ def generate_research_report(state: ResearchState) -> dict[str, Any]:
 
     title = "# ResearchOps 研究报告"
     status_line = "降级报告" if degraded else "正常报告"
+    input_guard_result = state.get("input_guard_result", {})
+    stopped_by_input_guard = bool(
+        input_guard_result
+        and (
+            input_guard_result.get("safety_pass") is False
+            or input_guard_result.get("downgrade_required") is True
+        )
+    )
     degradation_block = ""
     if degraded:
-        degradation_block = f"\n## 降级说明\n\n{state.get('degradation_reason')}\n"
+        guard_note = ""
+        if stopped_by_input_guard:
+            guard_note = "\n\n本次运行在输入安全检查阶段已停止，未进入研究规划、检索和证据评估流程。"
+        degradation_block = f"\n## 降级说明\n\n{state.get('degradation_reason')}{guard_note}\n"
 
     conflict_lines = []
     for conflict in conflicts.values():
