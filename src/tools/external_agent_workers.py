@@ -91,7 +91,6 @@ def _compact_prompt(prompt: str, limit: int = 4000) -> str:
 
 
 @tool
-@traceable(name="call_claude_code_worker", run_type="tool")
 def call_claude_code_worker(prompt: str) -> str:
     """调用 Claude Code worker 处理复杂网页研究或策略迭代问题。"""
 
@@ -325,7 +324,6 @@ async def _call_codex_worker_async(prompt: str) -> AgentWorkerResult:
 
 
 @tool
-@traceable(name="call_codex_worker", run_type="tool")
 def call_codex_worker(prompt: str) -> str:
     """调用 Codex worker 处理复杂网页研究或策略迭代问题。"""
 

@@ -17,4 +17,6 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "langchain-mcp-adapters>=0.1.0",
     "agent-client-protocol>=0.12.0",
+    "mypy-extensions>=1.1.0",
+    "google-search-results>=2.4.2",
 ]

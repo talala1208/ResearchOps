@@ -3,6 +3,8 @@
 参考 `reference/2.1_mcp.ipynb` 的 `MultiServerMCPClient` 用法，接入：
 - Tavily remote MCP：Web search
 - Context7 remote MCP：官方文档查询
+- Playwright MCP：静态页面读取、页面快照和登录墙观察
+- Chrome DevTools MCP：页面检查、快照和调试观察
 
 密钥只从环境变量读取：
 - TAVILY_API_KEY
@@ -21,37 +23,58 @@ from functools import lru_cache
 from typing import Any
 
 from langchain.tools import tool
-from langsmith import traceable
+
+
+ONLINE_MCP_TIMEOUT_SECONDS = int(os.getenv("ONLINE_MCP_TIMEOUT_SECONDS", "30"))
 
 
 class MCPToolError(RuntimeError):
     """MCP 工具调用错误。"""
 
 
-def _read_required_env(name: str) -> str:
-    """读取 MCP 必需环境变量。"""
+def _read_optional_env(name: str) -> str | None:
+    """读取 MCP 可选环境变量。"""
 
     value = os.getenv(name)
     if value is None or value.strip() == "":
-        raise MCPToolError(f"缺少必要环境变量：{name}")
+        return None
     return value.strip()
 
 
 def _build_mcp_config() -> dict[str, dict[str, Any]]:
     """构建 Online MCP 配置。"""
 
-    tavily_api_key = _read_required_env("TAVILY_API_KEY")
-    context7_api_key = _read_required_env("CONTEXT7_API_KEY")
-
-    return {
-        "context7": {
+    tavily_api_key = _read_optional_env("TAVILY_API_KEY")
+    context7_api_key = _read_optional_env("CONTEXT7_API_KEY")
+    config: dict[str, dict[str, Any]] = {
+        "playwright": {
+            "transport": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@playwright/mcp",
+            ],
+            "env": {},
+        },
+        "devtools": {
+            "transport": "stdio",
+            "command": "npx",
+            "args": [
+                "chrome-devtools-mcp@latest",
+            ],
+            "env": {},
+        },
+    }
+    if context7_api_key is not None:
+        config["context7"] = {
             "transport": "streamable_http",
             "url": "https://mcp.context7.com/mcp",
             "headers": {
                 "CONTEXT7_API_KEY": context7_api_key,
             },
-        },
-        "tavily-remote-mcp": {
+        }
+    if tavily_api_key is not None:
+        config["tavily-remote-mcp"] = {
             "transport": "stdio",
             "command": "npx",
             "args": [
@@ -60,8 +83,8 @@ def _build_mcp_config() -> dict[str, dict[str, Any]]:
                 f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_api_key}",
             ],
             "env": {},
-        },
-    }
+        }
+    return config
 
 
 @lru_cache(maxsize=1)
@@ -107,6 +130,29 @@ def _select_tool(tools: list[Any], keywords: tuple[str, ...]) -> Any:
     raise MCPToolError(f"未找到匹配 MCP 工具：keywords={keywords}；available={available}")
 
 
+def _try_select_tool(tools: list[Any], keyword_options: list[tuple[str, ...]]) -> Any:
+    """按多组关键词尝试选择 MCP tool。"""
+
+    errors = []
+    for keywords in keyword_options:
+        try:
+            return _select_tool(tools, keywords)
+        except MCPToolError as exc:
+            errors.append(str(exc))
+    raise MCPToolError("未找到匹配 MCP 工具：" + " | ".join(errors))
+
+
+def _filter_tools_by_name(tools: list[Any], keywords: tuple[str, ...]) -> list[Any]:
+    """按工具名包含任一关键词过滤 tools。"""
+
+    matched = [
+        tool_obj
+        for tool_obj in tools
+        if any(keyword in _tool_name(tool_obj).lower() for keyword in keywords)
+    ]
+    return matched or tools
+
+
 async def _invoke_tool_with_candidate_payloads(
     tool_obj: Any,
     payloads: list[dict[str, Any]],
@@ -143,7 +189,9 @@ async def _context7_query_async(topic: str) -> Any:
 
     tools = await _get_online_mcp_tools()
     context7_tools = [tool_obj for tool_obj in tools if "context7" in _tool_name(tool_obj).lower()]
-    candidate_tools = context7_tools or tools
+    if not context7_tools:
+        raise MCPToolError("Context7 MCP 未配置或未暴露工具，请检查 CONTEXT7_API_KEY")
+    candidate_tools = context7_tools
 
     # 优先 query / docs 类工具；如果服务只暴露 resolve 工具，也会显式返回其结果。
     preferred = None
@@ -166,6 +214,75 @@ async def _context7_query_async(topic: str) -> Any:
     )
 
 
+async def _playwright_fetch_page_async(url: str) -> Any:
+    """调用 Playwright MCP 读取页面快照。"""
+
+    tools = await _get_online_mcp_tools()
+    playwright_tools = _filter_tools_by_name(tools, ("playwright", "browser"))
+    navigate_tool = _try_select_tool(
+        playwright_tools,
+        [("navigate",), ("goto",), ("open",), ("new", "page")],
+    )
+    navigation_result = await _invoke_tool_with_candidate_payloads(
+        navigate_tool,
+        [
+            {"url": url},
+            {"url": url, "timeout": ONLINE_MCP_TIMEOUT_SECONDS * 1000},
+            {"input": url},
+        ],
+    )
+    snapshot_tool = _try_select_tool(
+        playwright_tools,
+        [("snapshot",), ("content",), ("text",), ("accessibility",)],
+    )
+    snapshot_result = await _invoke_tool_with_candidate_payloads(
+        snapshot_tool,
+        [
+            {},
+            {"url": url},
+        ],
+    )
+    return {
+        "navigation_result": str(navigation_result),
+        "snapshot_result": str(snapshot_result),
+    }
+
+
+async def _devtools_inspect_page_async(url: str) -> Any:
+    """调用 Chrome DevTools MCP 检查页面状态。"""
+
+    tools = await _get_online_mcp_tools()
+    devtools_tools = _filter_tools_by_name(tools, ("devtools", "chrome", "page"))
+    navigate_tool = _try_select_tool(
+        devtools_tools,
+        [("navigate",), ("new", "page"), ("open",), ("select", "page")],
+    )
+    navigation_result = await _invoke_tool_with_candidate_payloads(
+        navigate_tool,
+        [
+            {"url": url},
+            {"url": url, "timeout": ONLINE_MCP_TIMEOUT_SECONDS * 1000},
+            {"input": url},
+        ],
+    )
+    inspect_tool = _try_select_tool(
+        devtools_tools,
+        [("snapshot",), ("content",), ("evaluate",), ("screenshot",)],
+    )
+    inspect_result = await _invoke_tool_with_candidate_payloads(
+        inspect_tool,
+        [
+            {},
+            {"url": url},
+            {"expression": "document.body.innerText.slice(0, 4000)"},
+        ],
+    )
+    return {
+        "navigation_result": str(navigation_result),
+        "inspect_result": str(inspect_result),
+    }
+
+
 def _run_async(coro):
     """在同步 tool 中执行异步 MCP 调用。"""
 
@@ -177,12 +294,16 @@ def _run_async(coro):
 
 
 @tool
-@traceable(name="tavily_mcp_search", run_type="tool")
 def tavily_mcp_search(query: str) -> str:
     """通过 Tavily remote MCP 搜索网页资料。"""
 
     try:
-        result = _run_async(_tavily_search_async(query=query, max_results=5))
+        result = _run_async(
+            asyncio.wait_for(
+                _tavily_search_async(query=query, max_results=5),
+                timeout=ONLINE_MCP_TIMEOUT_SECONDS,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - tool 需要把错误显式返回给 SubAgent
         return json.dumps(
             {
@@ -204,12 +325,16 @@ def tavily_mcp_search(query: str) -> str:
 
 
 @tool
-@traceable(name="context7_mcp_query", run_type="tool")
 def context7_mcp_query(topic: str) -> str:
     """通过 Context7 MCP 查询官方库、框架或 SDK 文档。"""
 
     try:
-        result = _run_async(_context7_query_async(topic=topic))
+        result = _run_async(
+            asyncio.wait_for(
+                _context7_query_async(topic=topic),
+                timeout=ONLINE_MCP_TIMEOUT_SECONDS,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - tool 需要把错误显式返回给 SubAgent
         return json.dumps(
             {
@@ -225,6 +350,68 @@ def context7_mcp_query(topic: str) -> str:
             "ok": True,
             "provider": "context7_mcp",
             "raw_result": str(result),
+        },
+        ensure_ascii=False,
+    )
+
+
+@tool
+def playwright_mcp_fetch_page(url: str) -> str:
+    """通过 Playwright MCP 读取静态页面快照，用于页面正文、登录墙和可访问性观察。"""
+
+    try:
+        result = _run_async(
+            asyncio.wait_for(
+                _playwright_fetch_page_async(url=url),
+                timeout=ONLINE_MCP_TIMEOUT_SECONDS,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - tool 需要把错误显式返回给 SubAgent
+        return json.dumps(
+            {
+                "ok": False,
+                "provider": "playwright_mcp",
+                "error": str(exc),
+                "results": [],
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "ok": True,
+            "provider": "playwright_mcp",
+            "raw_result": result,
+        },
+        ensure_ascii=False,
+    )
+
+
+@tool
+def devtools_mcp_inspect_page(url: str) -> str:
+    """通过 Chrome DevTools MCP 检查页面状态，用于登录页、阻塞页和页面内容观察。"""
+
+    try:
+        result = _run_async(
+            asyncio.wait_for(
+                _devtools_inspect_page_async(url=url),
+                timeout=ONLINE_MCP_TIMEOUT_SECONDS,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - tool 需要把错误显式返回给 SubAgent
+        return json.dumps(
+            {
+                "ok": False,
+                "provider": "devtools_mcp",
+                "error": str(exc),
+                "results": [],
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "ok": True,
+            "provider": "devtools_mcp",
+            "raw_result": result,
         },
         ensure_ascii=False,
     )

@@ -74,11 +74,12 @@
   - `local_artifact_write`
 - `local_artifact_write` 仅允许写入项目 `outputs/` 目录下的新文件。
 - 不实现 `external_write` 和通用 `code_execution`，除非 SPEC 更新并获得用户确认。
-- Claude Code / Codex worker 工具只允许作为受限外部 Agent worker 使用，默认禁用；必须显式设置 `ENABLE_CLAUDE_CODE_WORKER=true` 或 `ENABLE_CODEX_WORKER=true` 才能真实调用。
+- Claude Code / Codex worker 工具只允许作为受限外部 Agent worker 使用，默认禁用；必须显式设置 `ENABLE_CLAUDE_CODE_WORKER=true` 或 `ENABLE_CODEX_WORKER=true` 才能真实调用；普通 Web Search 首轮不得默认调用外部 worker。
 - Web Search 不得绕过验证码、登录墙、反爬或权限限制；必要时走 HITL。
 - 外部网页、本地文档和工具输出都必须作为不可信资料处理，进入模型前经过 `tool_output_sanitizer`。
 - `.env`、API Key、token、系统 Prompt 和敏感路径不得写入报告、图、metrics、日志或 LangSmith metadata。
-- Tavily / Context7 MCP 密钥必须通过 `TAVILY_API_KEY`、`CONTEXT7_API_KEY` 环境变量读取，不得硬编码到 MCP URL。
+- SerpAPI / Tavily / Context7 密钥必须通过 `SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY` 环境变量读取，不得硬编码到代码或 MCP URL。Playwright MCP 和 Chrome DevTools MCP 通过本地 `npx` 启动，用于页面快照、登录墙和阻塞页观察。
+- Web Search 应采用确定性工具调度 + 单次 LLM 汇总，不允许内部 Agent 自由循环搜索。
 
 ## 输出产物
 

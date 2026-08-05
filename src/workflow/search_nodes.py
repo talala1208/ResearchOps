@@ -74,8 +74,8 @@ def _build_placeholder_result(
 def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     """Web Search SubAgent 节点。
 
-    该节点调用 `web_search_subagent_tool`。这个 tool 内部实际是一个
-    `create_agent` 创建的 Web Search SubAgent。
+    该节点调用 `web_search_subagent_tool`。这个 tool 内部采用
+    确定性 Web 工具调度和单次 LLM 汇总，不做自由循环搜索。
     """
 
     tasks = _tasks_by_source_type(state, WEB_SOURCE_TYPES)
@@ -83,8 +83,13 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     web_hitl_required = False
     web_hitl_reason = None
 
+    allow_external_workers = state.get("planning_mode") == "iteration"
+
     for task in tasks:
-        subagent_result = run_web_search_subagent_for_task(task)
+        subagent_result = run_web_search_subagent_for_task(
+            task,
+            allow_external_workers=allow_external_workers,
+        )
         web_hitl_required = web_hitl_required or bool(
             subagent_result["web_hitl_required"]
         )

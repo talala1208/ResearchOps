@@ -96,3 +96,23 @@ class ResearchPlanWithSearchTasksOutput(ResearchPlanOutput):
 
     search_tasks: list[SearchTaskOutput]
     active_question_ids_after_dispatch: list[str] = Field(default_factory=list)
+
+
+class WebSearchResultOutput(BaseModel):
+    """Web Search SubAgent 单条候选结果。"""
+
+    title: str
+    url_or_path: str
+    snippet: str
+    source_name: str
+    published_at: str | None = None
+    requires_login: bool = False
+    blocked_reason: str | None = None
+
+
+class WebSearchSubAgentResultOutput(BaseModel):
+    """Web Search SubAgent 标准输出。"""
+
+    results: list[WebSearchResultOutput]
+    web_hitl_required: bool
+    hitl_reason: str | None = None

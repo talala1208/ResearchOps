@@ -87,7 +87,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 |---|---|---|---|
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `plan_research` | `user_query`、预算默认值、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：`research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值、首轮 `search_tasks`；迭代模式：下一轮 `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始规划 Prompt 或迭代检索 Prompt；根据 `search_tasks.source_type` 条件触发检索工具 |
-| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为调用 `@tool` 包装的 Web Search SubAgent；SubAgent 内部由 `create_agent` 创建；内部可调用 Tavily MCP、Context7 MCP、替代网页工具、Claude Code worker 和 Codex worker；外部 worker 默认禁用，用于复杂问题和策略迭代 |
+| `web_search_sub_agent` | `search_tasks`、`planning_mode` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为确定性调度 Web 工具 + 单次 LLM 汇总；默认只调用 SerpAPI、Tavily MCP 和 Context7 MCP；当 query 中包含 URL 时额外调用 Playwright MCP 和 Chrome DevTools MCP 做页面快照、登录墙和阻塞页观察；不使用内部 `create_agent` 自由循环；Claude Code / Codex worker 仅在 `planning_mode=iteration` 或显式允许时最多调用一个 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH` | `local_document_results` | 已实现只读 Markdown 搜索工具；用于检索本地知识类、经验类、复盘类内容，不调用 LLM |
 | `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 已接入本地 SQLite 结构化 mock 搜索工具，查询 `data/mock/ai_products.sqlite` |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
@@ -263,7 +263,9 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - `MAX_SAFETY_REVISIONS`
   - `HITL_CONFLICT_THRESHOLD`
   - `REVIEW_PASS_SCORE`
-- Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；密钥不得写入代码或 SPEC。
+- SerpAPI 使用 `SERPAPI_API_KEY`；Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；Playwright MCP 和 Chrome DevTools MCP 通过本地 `npx` 启动；密钥不得写入代码或 SPEC。
+- Online MCP 单次调用超时由 `ONLINE_MCP_TIMEOUT_SECONDS` 管理，防止 Web Search 长时间阻塞。
+- Web Search 外部 worker 选择由 `WEB_SEARCH_EXTERNAL_WORKER` 管理，只允许 `claude_code` 或 `codex` 二选一。
 - 缺少必要配置时必须显式失败，不得静默切换到不安全默认值或伪造数据。
 
 ### 安全
@@ -276,7 +278,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - `external_write`
   - `code_execution`
 - 第一版只开放 `read_only`、`network_read`、`local_file_read`、`local_artifact_write`。
-- Claude Code / Codex worker 属于可选外部 Agent worker 工具，默认禁用；只有显式设置 `ENABLE_CLAUDE_CODE_WORKER=true` 或 `ENABLE_CODEX_WORKER=true` 时才允许真实调用。
+- Claude Code / Codex worker 属于可选外部 Agent worker 工具，默认禁用；只有显式设置 `ENABLE_CLAUDE_CODE_WORKER=true` 或 `ENABLE_CODEX_WORKER=true` 时才允许真实调用；普通 Web Search 首轮不得默认调用外部 worker。
 - `local_artifact_write` 仅允许写项目 `outputs/` 目录下的新文件。
 - 禁止绕过验证码、登录墙、反爬或权限控制。
 - 外部网页和本地文档内容必须标记为不可信资料。
