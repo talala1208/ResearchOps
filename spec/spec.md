@@ -101,11 +101,11 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
 | `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
 | `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `dispatch_search_tasks`；通过 `search_dispatch_mode=iteration` 区分第一次分发 |
-| `prepare_degraded_report` | `degradation_reason`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 只设置降级状态，不写报告正文 |
-| `generate_research_report` | `user_query`、`evidence_matrix`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 普通和降级报告都由此节点生成 |
-| `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard` | `review_result` | 只评估研究质量；不评估安全边界 |
-| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 只评估安全边界；不替代质量 Review |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`output_artifacts`、`evaluation_metrics` | 只写 `outputs/` 下新文件 |
+| `prepare_degraded_report` | `degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；只设置降级状态，不写报告正文 |
+| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
+| `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
+| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown 和 metrics JSON 保存；只写 `outputs/` 下新文件 |
 
 ### 关键状态与边界
 
