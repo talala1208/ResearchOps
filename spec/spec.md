@@ -105,7 +105,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown 和 metrics JSON 保存；只写 `outputs/` 下新文件 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行 Mermaid 和 PNG 静默保存；只写 `outputs/` 下新文件 |
 
 ### 关键状态与边界
 
@@ -125,7 +125,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - `generate_research_report` 负责普通报告和降级报告正文生成。
 - `review_research_report` 负责研究质量，不负责安全审查。
 - `safety_review` 负责安全边界，不负责研究质量评分。
-- 后台实际运行 Mermaid / PNG 保存不放入主 Graph 编排节点，避免污染业务流程。
+- 后台实际运行 Mermaid / PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点，避免污染业务流程。
 
 ### 预算控制
 
@@ -328,6 +328,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 - [ ] Graph 可以从 `src.workflow.graph.graph` 导入并成功 invoke。
 - [ ] 静态编排图可以通过 `scripts/export_graph_mermaid.py` 保存到 `outputs/runs/researchops_graph.png`。
+- [ ] 每次运行到 `persist_outputs` 时，会静默保存实际运行链路 Mermaid 到 `outputs/runs/<run_id>_executed.mmd`，并保存 PNG 到 `outputs/runs/<run_id>_executed.png`。
 - [ ] State 中不存在全局 `max_steps` 作为所有节点共享预算；检索、Review、安全分别独立计数。
 - [ ] `dispatch_search_tasks` 到三类检索工具是条件边。
 - [ ] 三类检索工具在图上汇合到 `tool_output_sanitizer`。

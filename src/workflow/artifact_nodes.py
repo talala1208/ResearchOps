@@ -7,9 +7,115 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from langchain_core.runnables.graph_mermaid import draw_mermaid_png
+
 from src.config.settings import get_project_root
 from src.schemas.state import ResearchState
-from src.workflow.node_utils import record_node
+
+
+NODE_CLASSES = {
+    "safety": {
+        "input_guard",
+        "tool_output_sanitizer",
+        "safety_review",
+    },
+    "planner": {
+        "analyze_research_request",
+        "dispatch_search_tasks",
+    },
+    "tool": {
+        "web_search_sub_agent",
+        "local_document_search_tool",
+        "query_structured_data",
+    },
+    "evidence": {
+        "deduplicate_and_cluster",
+        "evaluate_evidence_quality",
+        "build_evidence_matrix",
+        "check_evidence_sufficiency",
+    },
+    "hitl": {
+        "web_search_hitl_request",
+        "request_human_review",
+    },
+    "control": {
+        "check_step_budget",
+        "strategy_iteration",
+    },
+    "output": {
+        "prepare_degraded_report",
+        "generate_research_report",
+        "review_research_report",
+        "persist_outputs",
+    },
+}
+
+CLASS_DEFS = """
+classDef safety fill:#ffe4e6,stroke:#e11d48,color:#111827;
+classDef planner fill:#dbeafe,stroke:#2563eb,color:#111827;
+classDef tool fill:#dcfce7,stroke:#16a34a,color:#111827;
+classDef evidence fill:#fef3c7,stroke:#d97706,color:#111827;
+classDef hitl fill:#f3e8ff,stroke:#9333ea,color:#111827;
+classDef control fill:#fed7aa,stroke:#ea580c,color:#111827;
+classDef output fill:#e5e7eb,stroke:#4b5563,color:#111827;
+""".strip()
+
+
+def _node_class(node_name: str) -> str | None:
+    """返回运行节点对应的 Mermaid 样式分类。"""
+
+    for class_name, node_names in NODE_CLASSES.items():
+        if node_name in node_names:
+            return class_name
+    return None
+
+
+def _mermaid_label(value: str) -> str:
+    """转义 Mermaid 节点标签。"""
+
+    return value.replace('"', r'\"')
+
+
+def _build_executed_mermaid(executed_nodes: list[str]) -> str:
+    """根据本次实际执行节点顺序生成 Mermaid。"""
+
+    lines = [
+        "---",
+        "config:",
+        "  flowchart:",
+        "    curve: linear",
+        "---",
+        "flowchart TD",
+        "    N0([start])",
+    ]
+    for index, node_name in enumerate(executed_nodes, start=1):
+        lines.append(f'    N{index}["{_mermaid_label(node_name)}"]')
+    end_index = len(executed_nodes) + 1
+    lines.append(f"    N{end_index}([end])")
+
+    for index in range(end_index):
+        lines.append(f"    N{index} --> N{index + 1}")
+
+    lines.append(CLASS_DEFS)
+    for index, node_name in enumerate(executed_nodes, start=1):
+        class_name = _node_class(node_name)
+        if class_name is not None:
+            lines.append(f"    class N{index} {class_name};")
+    return "\n".join(lines) + "\n"
+
+
+def _write_executed_graph_png(
+    runs_dir: Path,
+    run_id: str,
+    executed_nodes: list[str],
+) -> tuple[str, str]:
+    """静默保存实际运行链路 PNG。"""
+
+    mermaid = _build_executed_mermaid(executed_nodes)
+    png_path = runs_dir / f"{run_id}_executed.png"
+    png_bytes = draw_mermaid_png(mermaid_syntax=mermaid, background_color="white")
+    png_path.write_bytes(png_bytes)
+    return mermaid, str(png_path)
 
 
 def _build_run_id() -> str:
@@ -32,11 +138,7 @@ def _source_contribution(state: ResearchState) -> dict[str, int]:
 
 
 def persist_outputs(state: ResearchState) -> dict[str, Any]:
-    """保存最终报告和运行指标到 `outputs/`。
-
-    当前不在主 Graph 内生成实际运行 Mermaid / PNG；该能力后续由后台静默
-    产物逻辑接入。
-    """
+    """保存最终报告、运行指标和实际运行链路 PNG 到 `outputs/`。"""
 
     executed_nodes_before = state.get("executed_nodes", [])
     executed_nodes = [*executed_nodes_before, "persist_outputs"]
@@ -52,6 +154,11 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
 
     final_report = state["final_report"]
     report_path.write_text(final_report, encoding="utf-8")
+    executed_mermaid, executed_mermaid_png_path = _write_executed_graph_png(
+        runs_dir=runs_dir,
+        run_id=run_id,
+        executed_nodes=executed_nodes,
+    )
 
     source_contribution = _source_contribution(state)
     web_hitl_trigger_count_by_source = {
@@ -78,6 +185,7 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         "safety_risk_level": state.get("safety_review_result", {}).get("safety_risk_level"),
         "source_contribution": source_contribution,
         "web_hitl_trigger_count_by_source": web_hitl_trigger_count_by_source,
+        "executed_mermaid_png_path": executed_mermaid_png_path,
     }
     metrics_path.write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
@@ -87,11 +195,12 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
     return {
         "executed_nodes": executed_nodes,
         "final_report_path": str(report_path),
-        "executed_mermaid": None,
-        "executed_mermaid_png_path": None,
+        "executed_mermaid": executed_mermaid,
+        "executed_mermaid_png_path": executed_mermaid_png_path,
         "output_artifacts": {
             "final_report": str(report_path),
             "metrics": str(metrics_path),
+            "executed_mermaid_png": executed_mermaid_png_path,
         },
         "evaluation_metrics": metrics,
     }
