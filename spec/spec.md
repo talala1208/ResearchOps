@@ -82,6 +82,31 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
         -> 否则：persist_outputs
 ```
 
+### 节点输入输出契约
+
+| 节点 | 主要读取字段 | 主要写入字段 | 路由 / 边界 |
+|---|---|---|---|
+| `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
+| `analyze_research_request` | `user_query`、预算默认值 | `research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值 | 真实 LLM 结构化输出节点；必须建立并校验 `question_id` 目录 |
+| `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps` | `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具 |
+| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required` | 遇到登录墙、验证码、反爬或需要用户接管时触发 Web HITL |
+| `local_document_search_sub_agent` | `search_tasks`、本地文档配置 | `local_document_results` | 只读本地允许路径 |
+| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 只读本地 mock 数据 |
+| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `hitl_decisions` | HITL 完成或放弃后进入工具输出清洗 |
+| `tool_output_sanitizer` | `web_search_results`、`local_document_results`、`structured_data_results` | `raw_search_results`、`sanitized_results` | 外部内容必须标记为不可信资料 |
+| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 不生成最终证据结论 |
+| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required` | 发现高冲突时触发冲突 HITL |
+| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 人工确认结果只作为状态事实，不直接改写证据正文 |
+| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`hitl_decisions` | `evidence_matrix` | 必须通过 `question_id` 和 `evidence_id` 关联 |
+| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids` | Priority 影响整体证据充足性评分 |
+| `check_step_budget` | `search_steps`、`max_search_steps` | `step_budget_exhausted` | 只判断检索预算，不负责降级 |
+| `strategy_iteration` | `insufficient_question_ids`、`iteration_count` | `iteration_count`、`active_question_ids` | 实线回到 `dispatch_search_tasks` |
+| `prepare_degraded_report` | `degradation_reason`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 只设置降级状态，不写报告正文 |
+| `generate_research_report` | `user_query`、`evidence_matrix`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 普通和降级报告都由此节点生成 |
+| `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard` | `review_result` | 只评估研究质量；不评估安全边界 |
+| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 只评估安全边界；不替代质量 Review |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`output_artifacts`、`evaluation_metrics` | 只写 `outputs/` 下新文件 |
+
 ### 关键状态与边界
 
 - `sub_questions` 是唯一问题目录，key 为 `question_id`。
@@ -126,7 +151,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 
 | 模块 | 职责 | 可依赖 | 禁止依赖 |
 |---|---|---|---|
-| `src/workflow` | Graph 构建、节点、条件路由 | `src/schemas`、工具接口、LLM 接口 | 直接硬编码具体 API Key |
+| `src/workflow` | Graph 构建、节点统一导出、按职责拆分的节点实现、条件路由 | `src/schemas`、工具接口、LLM 接口 | 直接硬编码具体 API Key |
 | `src/schemas` | State、研究计划、证据、Review、安全类型 | 标准库类型 | 运行时外部服务 |
 | `src/llm` | 模型初始化、结构化输出、Prompt 加载调用 | `src/config`、`prompts` | 业务流程路由决策散落在此处 |
 | `src/tools` | Web、本地文档、结构化数据等工具 | `src/config`、外部只读 API | 外部写入、绕过权限墙 |

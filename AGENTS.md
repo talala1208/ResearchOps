@@ -21,7 +21,7 @@
 | 路径 | 职责 |
 |---|---|
 | `spec/spec.md` | 当前有效需求、流程、契约、边界和验收标准 |
-| `src/workflow/` | LangGraph graph、nodes、edges 和路由逻辑 |
+| `src/workflow/` | LangGraph graph、edges、路由逻辑和按职责拆分的节点实现 |
 | `src/schemas/` | State、研究计划、证据、Review、安全等类型定义；当前 schema 文件不拆分 |
 | `src/llm/` | 模型初始化、Prompt 加载、结构化输出封装 |
 | `src/tools/` | Web、本地文档、结构化数据等只读工具 |
@@ -44,7 +44,7 @@
 
 - Graph 主入口为 `src.workflow.graph.graph`；不得在脚本或测试中复制另一套 Graph 编排。
 - `src/workflow/edges.py` 只放边、节点名常量和路由函数。
-- `src/workflow/nodes.py` 只放节点函数；真实工具、LLM 调用、产物保存逻辑应下沉到对应模块。
+- `src/workflow/nodes.py` 只做节点统一导出；具体节点实现按职责放在 `planning_nodes.py`、`search_nodes.py`、`evidence_nodes.py`、`report_nodes.py`、`guard_nodes.py`、`artifact_nodes.py`。真实工具、LLM 调用、产物保存逻辑应下沉到对应模块。
 - State 的业务对象通过稳定 ID 关联，不复制正文：
   - `sub_questions`：`question_id -> SubQuestion`
   - `expected_evidence`：`question_id -> ExpectedEvidence`
