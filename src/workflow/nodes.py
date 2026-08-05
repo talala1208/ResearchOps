@@ -27,6 +27,7 @@ from src.workflow.search_nodes import (
     local_document_search_sub_agent,
     query_structured_data,
     tool_output_sanitizer,
+    web_search_hitl_request,
     web_search_sub_agent,
 )
 
@@ -49,5 +50,6 @@ __all__ = [
     "safety_review",
     "strategy_iteration",
     "tool_output_sanitizer",
+    "web_search_hitl_request",
     "web_search_sub_agent",
 ]

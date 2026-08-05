@@ -89,10 +89,10 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `analyze_research_request` | `user_query`、预算默认值 | `research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值 | 真实 LLM 结构化输出节点；必须建立并校验 `question_id` 目录 |
 | `dispatch_search_tasks` | `active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_steps` | `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps` | 真实 LLM 结构化输出节点；根据 `search_tasks.source_type` 条件触发检索工具 |
-| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required` | 遇到登录墙、验证码、反爬或需要用户接管时触发 Web HITL |
-| `local_document_search_sub_agent` | `search_tasks`、本地文档配置 | `local_document_results` | 只读本地允许路径 |
-| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 只读本地 mock 数据 |
-| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `hitl_decisions` | HITL 完成或放弃后进入工具输出清洗 |
+| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required` | 当前为替代数据源实现；遇到登录墙、验证码、反爬或需要用户接管时触发 Web HITL |
+| `local_document_search_sub_agent` | `search_tasks`、本地文档配置 | `local_document_results` | 当前为替代数据源实现；真实版本只读本地允许路径 |
+| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 当前为替代数据源实现，直接提供结构化 mock 结果 |
+| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
 | `tool_output_sanitizer` | `web_search_results`、`local_document_results`、`structured_data_results` | `raw_search_results`、`sanitized_results` | 外部内容必须标记为不可信资料 |
 | `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 不生成最终证据结论 |
 | `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required` | 发现高冲突时触发冲突 HITL |

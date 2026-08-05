@@ -47,6 +47,7 @@ from src.workflow.nodes import (
     safety_review,
     strategy_iteration,
     tool_output_sanitizer,
+    web_search_hitl_request,
     web_search_sub_agent,
 )
 
@@ -60,7 +61,7 @@ def build_graph():
     builder.add_node(ANALYZE_RESEARCH_REQUEST, analyze_research_request)
     builder.add_node(DISPATCH_SEARCH_TASKS, dispatch_search_tasks)
     builder.add_node(WEB_SEARCH_SUB_AGENT, web_search_sub_agent)
-    builder.add_node(WEB_SEARCH_HITL_REQUEST, request_human_review)
+    builder.add_node(WEB_SEARCH_HITL_REQUEST, web_search_hitl_request)
     builder.add_node(LOCAL_DOCUMENT_SEARCH_SUB_AGENT, local_document_search_sub_agent)
     builder.add_node(QUERY_STRUCTURED_DATA, query_structured_data)
     builder.add_node(TOOL_OUTPUT_SANITIZER, tool_output_sanitizer)

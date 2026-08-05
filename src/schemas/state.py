@@ -220,6 +220,7 @@ class ResearchState(TypedDict, total=False):
     # 工具原始输出
     web_search_results: list[dict]
     web_hitl_required: bool
+    web_hitl_decisions: list[dict]
     local_document_results: list[dict]
     structured_data_results: list[dict]
     raw_search_results: list[dict]
