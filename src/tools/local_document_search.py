@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
+import jieba
 from langchain.tools import tool
 
 from src.config.settings import _read_required_env
@@ -17,6 +19,34 @@ from src.config.settings import _read_required_env
 MAX_FILE_SIZE_BYTES = 1_000_000
 MAX_RESULTS = 8
 SNIPPET_RADIUS = 180
+_PUNCTUATION_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
+_STOPWORDS = {
+    "的",
+    "了",
+    "和",
+    "与",
+    "及",
+    "或",
+    "在",
+    "是",
+    "有",
+    "为",
+    "对",
+    "等",
+    "中",
+    "上",
+    "下",
+    "也",
+    "就",
+    "都",
+    "而",
+    "把",
+    "被",
+    "从",
+    "到",
+    "以",
+    "及其",
+}
 
 
 def _base_path() -> Path:
@@ -66,11 +96,36 @@ def _extract_snippet(content: str, query_terms: list[str]) -> str:
     return " ".join(snippet.split())
 
 
+def _tokenize_query(query: str) -> list[str]:
+    """根据上游 search task 的 query 做 jieba 搜索分词。"""
+
+    normalized = query.replace("，", " ").replace(",", " ").strip()
+    if not normalized:
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in jieba.lcut_for_search(normalized):
+        cleaned = term.strip()
+        if not cleaned:
+            continue
+        if _PUNCTUATION_ONLY.match(cleaned):
+            continue
+        if cleaned in _STOPWORDS:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(cleaned)
+    return terms
+
+
 def search_markdown_documents(query: str, limit: int = MAX_RESULTS) -> list[dict[str, Any]]:
     """搜索本地 Markdown 文档。"""
 
     base = _base_path()
-    query_terms = [term.strip() for term in query.replace("，", " ").split() if term.strip()]
+    query_terms = _tokenize_query(query)
     if not query_terms:
         raise ValueError("本地文档搜索 query 不能为空")
 

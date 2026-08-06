@@ -142,6 +142,20 @@ async def _get_online_mcp_tools(server_name: str | None = None) -> list[Any]:
     return await client.get_tools(server_name=server_name)
 
 
+async def _load_mcp_session_tools(session: Any) -> list[Any]:
+    """从显式 MCP 会话加载工具，供有状态的连续调用复用。"""
+
+    try:
+        from langchain_mcp_adapters.tools import load_mcp_tools
+    except ImportError as exc:
+        raise MCPToolError(
+            "无法导入 langchain_mcp_adapters.tools.load_mcp_tools；"
+            "请检查 langchain-mcp-adapters 与 mcp 包版本是否兼容。"
+            f"原始错误：{exc}"
+        ) from exc
+    return await load_mcp_tools(session)
+
+
 def _tool_name(tool_obj: Any) -> str:
     """读取工具名。"""
 
@@ -257,31 +271,33 @@ async def _context7_query_async(topic: str) -> Any:
 async def _playwright_fetch_page_async(url: str) -> Any:
     """调用 Playwright MCP 读取页面快照。"""
 
-    tools = await _get_online_mcp_tools(server_name="playwright")
-    playwright_tools = _filter_tools_by_name(tools, ("playwright", "browser"))
-    navigate_tool = _try_select_tool(
-        playwright_tools,
-        [("navigate",), ("goto",), ("open",), ("new", "page")],
-    )
-    navigation_result = await _invoke_tool_with_candidate_payloads(
-        navigate_tool,
-        [
-            {"url": url},
-            {"url": url, "timeout": ONLINE_MCP_TIMEOUT_SECONDS * 1000},
-            {"input": url},
-        ],
-    )
-    snapshot_tool = _try_select_tool(
-        playwright_tools,
-        [("snapshot",), ("content",), ("text",), ("accessibility",)],
-    )
-    snapshot_result = await _invoke_tool_with_candidate_payloads(
-        snapshot_tool,
-        [
-            {},
-            {"url": url},
-        ],
-    )
+    client = _build_mcp_client()
+    async with client.session("playwright") as session:
+        tools = await _load_mcp_session_tools(session)
+        playwright_tools = _filter_tools_by_name(tools, ("playwright", "browser"))
+        navigate_tool = _try_select_tool(
+            playwright_tools,
+            [("navigate",), ("goto",), ("open",), ("new", "page")],
+        )
+        navigation_result = await _invoke_tool_with_candidate_payloads(
+            navigate_tool,
+            [
+                {"url": url},
+                {"url": url, "timeout": ONLINE_MCP_TIMEOUT_SECONDS * 1000},
+                {"input": url},
+            ],
+        )
+        snapshot_tool = _try_select_tool(
+            playwright_tools,
+            [("snapshot",), ("content",), ("text",), ("accessibility",)],
+        )
+        snapshot_result = await _invoke_tool_with_candidate_payloads(
+            snapshot_tool,
+            [
+                {},
+                {"url": url},
+            ],
+        )
     return {
         "navigation_result": str(navigation_result),
         "snapshot_result": str(snapshot_result),
