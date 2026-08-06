@@ -137,3 +137,16 @@ class WebSearchSubAgentResultOutput(BaseModel):
     results: list[WebSearchResultOutput]
     web_hitl_required: bool
     hitl_reason: str | None = None
+
+
+class LocalStructuredSearchQueryOutput(BaseModel):
+    """本地结构化资料查询规划输出。"""
+
+    search_terms: list[str] = Field(
+        min_length=1,
+        description="用于本地 SQLite 参数化 LIKE 查询的关键词。",
+    )
+    sql_search_statement: str = Field(
+        description="可观测的结构化查询说明，不直接拼接执行。",
+    )
+    reasoning: str = Field(description="简短说明为什么选择这些关键词。")

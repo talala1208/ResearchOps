@@ -17,13 +17,13 @@ from src.workflow.edges import (
     LOCAL_DOCUMENT_SEARCH_TOOL,
     PERSIST_OUTPUTS,
     PREPARE_DEGRADED_REPORT,
-    QUERY_STRUCTURED_DATA,
     REQUEST_HUMAN_REVIEW,
     REVIEW_RESEARCH_REPORT,
     SAFETY_REVIEW,
     STRATEGY_ITERATION,
     TOOL_OUTPUT_SANITIZER,
     WEB_SEARCH_SUB_AGENT,
+    WEB_SEARCH_RESULT_READY,
     WEB_SEARCH_HITL_REQUEST,
     add_workflow_edges,
 )
@@ -39,13 +39,13 @@ from src.workflow.nodes import (
     local_document_search_tool,
     persist_outputs,
     prepare_degraded_report,
-    query_structured_data,
     request_human_review,
     review_research_report,
     safety_review,
     strategy_iteration,
     tool_output_sanitizer,
     web_search_hitl_request,
+    web_search_result_ready,
     web_search_sub_agent,
 )
 
@@ -59,8 +59,8 @@ def build_graph():
     builder.add_node(PLAN_RESEARCH, plan_research)
     builder.add_node(WEB_SEARCH_SUB_AGENT, web_search_sub_agent)
     builder.add_node(WEB_SEARCH_HITL_REQUEST, web_search_hitl_request)
+    builder.add_node(WEB_SEARCH_RESULT_READY, web_search_result_ready)
     builder.add_node(LOCAL_DOCUMENT_SEARCH_TOOL, local_document_search_tool)
-    builder.add_node(QUERY_STRUCTURED_DATA, query_structured_data)
     builder.add_node(TOOL_OUTPUT_SANITIZER, tool_output_sanitizer)
     builder.add_node(DEDUPLICATE_AND_CLUSTER, deduplicate_and_cluster)
     builder.add_node(EVALUATE_EVIDENCE_QUALITY, evaluate_evidence_quality)

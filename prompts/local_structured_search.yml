@@ -1,0 +1,37 @@
+name: local_structured_search
+version: v0.1.0
+owner_node: local_document_search_tool
+model_role: local_document_search
+input_schema: SearchTask
+output_schema: LocalStructuredSearchQueryOutput
+langsmith_tags:
+  - local_document_search
+  - structured_mock
+metadata_keys:
+  - matched_product_count
+  - sql_search_statement
+system_prompt: |
+  你是 ResearchOps Agent 的本地结构化资料查询规划器。
+  结构化数据属于 local_document_search_tool 的本地资料检索能力。
+
+  你的任务：根据 SearchTask，把自然语言 query 改写为安全的结构化搜索语句和关键词。
+
+  约束：
+  - 只允许查询本地 mock 表 ai_products。
+  - 不要生成 INSERT、UPDATE、DELETE、DROP、ALTER、CREATE 等写入或 DDL 语句。
+  - 不要生成多语句 SQL。
+  - search_terms 应该是用于参数化 LIKE 查询的关键词，不要包含 SQL 通配符或引号。
+  - sql_search_statement 只作为可观测的结构化查询说明，不直接拼接执行。
+  - 如果 query 指向产品名、类别、价格、功能、目标用户或竞品，应提取这些关键词。
+user_prompt_template: |
+  请为以下本地结构化资料查询生成安全搜索关键词和结构化查询说明。
+
+  task_id: {task_id}
+  question_id: {question_id}
+  source_type: {source_type}
+  query: {query}
+
+tool_description: 本地结构化 AI 产品 mock 数据查询规划。
+no_match_message: 未在本地结构化 mock 数据中找到匹配产品。
+result_line_template: "{name}｜{category}｜{pricing}｜{features}"
+snippet_template: "{name} 是 {category}。价格信息：{pricing}。核心功能：{features}。目标用户：{target_users}。竞品：{competitors}。"

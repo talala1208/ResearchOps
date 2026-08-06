@@ -15,7 +15,9 @@ from typing import Any
 from langchain_core.tools import tool
 
 from src.config.settings import get_project_root
-from src.llm.prompt_loader import load_yaml_config
+from src.llm.chat import build_chat_model
+from src.llm.prompt_loader import load_prompt, render_prompt_template
+from src.llm.structured_outputs import LocalStructuredSearchQueryOutput
 
 
 DB_PATH = get_project_root() / "data" / "mock" / "ai_products.sqlite"
@@ -24,9 +26,9 @@ SEED_PRODUCTS_PATH = get_project_root() / "data" / "mock" / "ai_products.json"
 
 
 def _structured_tool_config() -> dict[str, Any]:
-    """读取结构化 SQL 工具 YAML 配置。"""
+    """读取本地结构化搜索 YAML 配置。"""
 
-    return load_yaml_config("structured_sql_tool.yml")
+    return load_prompt("local_structured_search.yml")
 
 
 def load_seed_products() -> list[dict[str, str]]:
@@ -108,11 +110,24 @@ def ensure_mock_database() -> Path:
 def search_ai_products(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """用参数化 SQL 查询 AI 产品 mock 表。"""
 
+    return search_ai_products_by_terms(
+        [term.strip() for term in query.replace("，", " ").split() if term.strip()]
+        or ([query.strip()] if query.strip() else [""]),
+        limit=limit,
+    )
+
+
+def search_ai_products_by_terms(
+    search_terms: list[str],
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """用 LLM 规划出的关键词执行参数化 SQL 查询。"""
+
     db_path = ensure_mock_database()
     normalized_limit = max(1, min(limit, 20))
-    terms = [term.strip() for term in query.replace("，", " ").split() if term.strip()]
+    terms = [term.strip() for term in search_terms if term.strip()]
     if not terms:
-        terms = [query.strip()] if query.strip() else [""]
+        raise ValueError("结构化资料搜索关键词不能为空")
 
     where_parts = []
     params: list[str | int] = []
@@ -160,10 +175,38 @@ def structured_ai_product_search(query: str) -> str:
     )
 
 
+def _plan_structured_search_query(task: dict[str, Any]) -> LocalStructuredSearchQueryOutput:
+    """用本地资料检索共用 LLM 规划结构化搜索语句。"""
+
+    prompt = _structured_tool_config()
+    user_prompt = render_prompt_template(
+        prompt["user_prompt_template"],
+        {
+            "task_id": task["task_id"],
+            "question_id": task["question_id"],
+            "source_type": task["source_type"],
+            "query": task["query"],
+        },
+    )
+    model = build_chat_model("local_document_search").with_structured_output(
+        LocalStructuredSearchQueryOutput
+    )
+    return model.invoke(
+        [
+            ("system", prompt["system_prompt"]),
+            ("human", user_prompt),
+        ]
+    )
+
+
 def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, Any]]:
     """按 SearchTask 查询结构化 mock 数据并返回工具结果。"""
 
-    rows = search_ai_products(query=task["query"], limit=5)
+    structured_query = _plan_structured_search_query(task)
+    rows = search_ai_products_by_terms(
+        search_terms=structured_query.search_terms,
+        limit=5,
+    )
     results = []
     for row in rows:
         result_id = f"R_structured_{task['task_id']}_{row['id']}"
@@ -180,11 +223,16 @@ def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, A
                 "title": f"结构化产品数据：{row['name']}",
                 "snippet": snippet,
                 "published_at": None,
-                "collected_by": "query_structured_data",
+                "collected_by": "local_structured_search",
                 "is_placeholder": False,
                 "requires_login": False,
                 "blocked_reason": None,
-                "structured_payload": row,
+                "structured_payload": {
+                    **row,
+                    "search_terms": structured_query.search_terms,
+                    "sql_search_statement": structured_query.sql_search_statement,
+                    "search_reasoning": structured_query.reasoning,
+                },
             }
         )
     return results

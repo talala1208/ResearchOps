@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.create_langsmith_datasets import build_dataset_specs
+from src.dataset.create_langsmith_datasets import build_dataset_specs
 
 
 class CreateLangSmithDatasetsTest(unittest.TestCase):

@@ -15,14 +15,20 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 
 ### 成功指标
 
-| 指标 | 当前基线 | 目标 | 测量方式 |
-|---|---:|---:|---|
-| MVP 链路可运行 | 空 Graph 占位可运行 | 一次运行能产出报告、指标和本地图 | 手动 smoke 运行 |
-| 报告可追溯 | 无真实证据 | 报告中引用的结论能关联 `evidence_id` | Review 节点与人工检查 |
-| 证据不足处理 | 占位降级 | 证据不足时不强行编造，输出降级原因 | 降级样例测试 |
-| 安全边界 | 占位安全审查 | 注入、敏感信息和高风险请求能被标记或降级 | Safety Dataset |
+
+| 指标        | 当前基线          | 目标                        | 测量方式           |
+| --------- | ------------- | ------------------------- | -------------- |
+| MVP 链路可运行 | 空 Graph 占位可运行 | 一次运行能产出报告、指标和本地图          | 手动 smoke 运行    |
+| 报告可追溯     | 无真实证据         | 报告中引用的结论能关联 `evidence_id` | Review 节点与人工检查 |
+| 证据不足处理    | 占位降级          | 证据不足时不强行编造，输出降级原因         | 降级样例测试         |
+| 安全边界      | 占位安全审查        | 注入、敏感信息和高风险请求能被标记或降级      | Safety Dataset |
+
+
+
 
 ## 2. 范围
+
+
 
 ### 目标
 
@@ -36,6 +42,8 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 支持最终后台静默保存运行产物，包括报告、指标和实际运行图；当前静态编排图由脚本保存 PNG。
 - 保留 Prompt YAML 管理能力，后续核心 Prompt 可按节点版本化。
 
+
+
 ### 非目标
 
 - 第一版不实现复杂前端；演示优先使用 CLI、LangGraph API Server、Studio 或 agent_chat。
@@ -45,16 +53,24 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 第一版不做医疗、法律、金融等高风险领域的确定性建议。
 - 第一版不追求覆盖所有 AI 产品数据源，只保证默认 AI 产品研究模板的最小闭环。
 
+
+
 ### 用户与核心场景
 
-| 角色 | 场景 | 预期结果 |
-|---|---|---|
-| 项目作者 | 输入一个 AI 产品研究主题 | 生成可追溯研究报告和运行指标 |
-| 项目作者 | 运行示例或演示样例 | 可以展示 Graph 编排、降级、安全、评估设计 |
-| 面试官 | 询问项目如何避免幻觉 | 可以说明最低证据标准、证据评分、Review 和降级机制 |
-| 面试官 | 询问 Agent 安全 | 可以说明 Input Guard、Tool Output Sanitizer、权限分级和 Safety Review |
+
+| 角色   | 场景             | 预期结果                                                       |
+| ---- | -------------- | ---------------------------------------------------------- |
+| 项目作者 | 输入一个 AI 产品研究主题 | 生成可追溯研究报告和运行指标                                             |
+| 项目作者 | 运行示例或演示样例      | 可以展示 Graph 编排、降级、安全、评估设计                                   |
+| 面试官  | 询问项目如何避免幻觉     | 可以说明最低证据标准、证据评分、Review 和降级机制                               |
+| 面试官  | 询问 Agent 安全    | 可以说明 Input Guard、Tool Output Sanitizer、权限分级和 Safety Review |
+
+
+
 
 ## 3. 核心行为与边界
+
+
 
 ### 主流程
 
@@ -62,7 +78,8 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 用户输入研究主题
   -> input_guard
   -> plan_research
-  -> 条件触发 web_search_sub_agent / local_document_search_tool / query_structured_data
+  -> 条件触发 web_search_sub_agent / local_document_search_tool
+  -> web_search_sub_agent 可选进入 web_search_hitl_request
   -> tool_output_sanitizer
   -> deduplicate_and_cluster
   -> evaluate_evidence_quality
@@ -81,29 +98,34 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
         -> 否则：persist_outputs
 ```
 
+
+
 ### 节点输入输出契约
 
-| 节点 | 主要读取字段 | 主要写入字段 | 路由 / 边界 |
-|---|---|---|---|
-| `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
-| `plan_research` | `user_query`、预算默认值、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：`research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值、首轮 `search_tasks`；迭代模式：下一轮 `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始规划 Prompt 或迭代检索 Prompt；根据 `search_tasks.source_type` 条件触发检索工具 |
-| `web_search_sub_agent` | `search_tasks`、`planning_mode` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为确定性调度 Web 工具 + 单次 LLM 汇总；默认只调用 SerpAPI、Tavily MCP 和 Context7 MCP；SerpAPI 必须直接返回结构化 JSON 搜索结果，包括 `title`、`url`、`snippet`、`published_at`；SerpAPI 搜索摘要只能作为候选入口，默认用 headless + isolated Playwright 抓取前 1 个结果 URL 的页面正文快照；可通过 WEB_SEARCH_FETCH_SERPAPI_TOP_N 调整数量，再交给 LLM 汇总；当 query 中包含 URL 时必须调用 headless Playwright MCP 抓取该 URL 页面快照；SerpAPI 结果页抓取数量独立由 WEB_SEARCH_FETCH_SERPAPI_TOP_N 控制，0 表示不抓；两者可以同时发生；Chrome DevTools MCP 不参与普通检索，仅在 web_search_hitl_request 中配合 HITL 确认和展示登录 / 权限页面；不使用内部 `create_agent` 自由循环；Claude Code / Codex worker 不进入 Web Search 默认工具池 |
-| `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH` | `local_document_results` | 已实现只读 Markdown 搜索工具；用于检索本地知识类、经验类、复盘类内容，不调用 LLM |
-| `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 已接入本地 SQLite 结构化 mock 搜索工具，查询 `data/mock/ai_products.sqlite` |
-| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
-| `tool_output_sanitizer` | `web_search_results`、`local_document_results`、`structured_data_results` | `raw_search_results`、`sanitized_results` | 外部内容必须标记为不可信资料 |
-| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
-| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required` | 当前为确定性规则评分；发现高冲突时触发冲突 HITL |
-| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 当前为替代实现，不真正暂停；人工确认结果只作为状态事实，不直接改写证据正文 |
-| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`hitl_decisions` | `evidence_matrix`、`entity_index.used_evidence_ids` | 必须通过 `question_id` 和 `evidence_id` 关联 |
-| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
-| `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
-| `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；通过 `planning_mode=iteration` 选择迭代检索 Prompt；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用 Claude Code 或 Codex 生成策略建议 |
-| `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
-| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成 |
-| `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
-| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
+
+| 节点                           | 主要读取字段                                                                                                                                      | 主要写入字段                                                                                                                                                                                                                                                  | 路由 / 边界                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_guard`                | `user_query`                                                                                                                                | `input_guard_result`、`executed_nodes`                                                                                                                                                                                                                   | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `plan_research`              | `user_query`、预算默认值、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context`             | 初始模式：`research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值、首轮 `search_tasks`；迭代模式：下一轮 `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始规划 Prompt 或迭代检索 Prompt；根据 `search_tasks.source_type` 条件触发检索工具                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `web_search_sub_agent`       | `search_tasks`、`planning_mode`                                                                                                              | `web_search_results`、`web_hitl_required`、`web_hitl_reason`                                                                                                                                                                                              | 已改为确定性调度 Web 工具 + 单次 LLM 汇总；默认只调用 SerpAPI、Tavily MCP 和 Context7 MCP；SerpAPI 必须直接返回结构化 JSON 搜索结果，包括 `title`、`url`、`snippet`、`published_at`；SerpAPI 搜索摘要只能作为候选入口，默认用 headless + isolated Playwright 抓取前 1 个结果 URL 的页面正文快照；可通过 WEB_SEARCH_FETCH_SERPAPI_TOP_N 调整数量，再交给 LLM 汇总；当 query 中包含 URL 时必须调用 headless Playwright MCP 抓取该 URL 页面快照；SerpAPI 结果页抓取数量独立由 WEB_SEARCH_FETCH_SERPAPI_TOP_N 控制，0 表示不抓；两者可以同时发生；Chrome DevTools MCP 不参与普通检索，仅在 web_search_hitl_request 中配合 HITL 确认和展示登录 / 权限页面；不使用内部 `create_agent` 自由循环；Claude Code / Codex worker 不进入 Web Search 默认工具池 |
+| `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH`、结构化 mock 数据配置                                                                                                  | `local_document_results`                                                                                                                                                                                                                                | 本地资料检索节点；`local_document` 走只读 Markdown 关键词搜索，用于检索本地知识类、经验类、复盘类内容；`structured_mock` 先由本地资料检索共用 LLM 规划安全搜索关键词和结构化查询说明，再用参数化 SQL 查询 `data/mock/ai_products.sqlite`。结构化数据也视为本地资料能力，后续 PDF 等本地资料读取也应并入该节点，而不是新增独立 Graph 节点。                                                                                                                                                                                                                                                                                                                                                                                     |
+| `web_search_hitl_request`    | `web_hitl_required`、`web_search_results`                                                                                                    | `web_hitl_decisions`、`web_hitl_required`                                                                                                                                                                                                                | 位于 Web Search 和工具输出清洗之间；只处理登录墙、验证码、权限确认等 Web 人工接管场景。当前为替代实现，真实版本 HITL 完成或放弃后再进入 `tool_output_sanitizer`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `tool_output_sanitizer`      | `web_search_results`、`local_document_results`                                                                                             | `raw_search_results`、`sanitized_results`                                                                                                                                                                                                                | 外部内容必须标记为不可信资料                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `deduplicate_and_cluster`    | `sanitized_results`                                                                                                                         | `evidence_clusters`                                                                                                                                                                                                                                     | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `evaluate_evidence_quality`  | `evidence_clusters`、`sub_questions`、`minimum_evidence_standard`                                                                             | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`                                                                                                                                                                                             | 当前为确定性规则评分；发现高冲突时触发冲突 HITL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `request_human_review`       | `conflicts`、`hitl_required`                                                                                                                 | `hitl_decisions`                                                                                                                                                                                                                                        | 当前为替代实现，不真正暂停；人工确认结果只作为状态事实，不直接改写证据正文                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `build_evidence_matrix`      | `evidence_items`、`sub_questions`、`hitl_decisions`                                                                                           | `evidence_matrix`、`entity_index.used_evidence_ids`                                                                                                                                                                                                      | 必须通过 `question_id` 和 `evidence_id` 关联                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix`                                                                               | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason`                                                                                                                         | 已实现 Priority 加权证据充足性评分                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `check_step_budget`          | `search_steps`、`max_search_steps`、`insufficient_question_ids`                                                                               | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason`                                                                                                                                                             | 只判断检索预算，不负责降级                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `strategy_iteration`         | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count`                                                     | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context`                                                                                                                       | 实线回到 `plan_research`；通过 `planning_mode=iteration` 选择迭代检索 Prompt；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用 Claude Code 或 Codex 生成策略建议                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `prepare_degraded_report`    | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count`                                                                                                                                                                                                 | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `generate_research_report`   | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result`                                                  | `report_draft`、`review_revision_count`                                                                                                                                                                                                                  | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `review_research_report`     | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result`                                                  | `review_result`                                                                                                                                                                                                                                         | 已实现确定性质量 Review；只评估研究质量；不评估安全边界                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `safety_review`              | `report_draft`、`review_result`、`safety_revision_count`                                                                                      | `safety_review_result`、`final_report`                                                                                                                                                                                                                   | 已实现规则安全审查；只评估安全边界；不替代质量 Review                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `persist_outputs`            | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes`                                                                                   | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics`                                                                                                                                              | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；不保存 `.mmd` 文件；只写 `outputs/` 下新文件                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+
+
 
 ### 关键状态与边界
 
@@ -114,7 +136,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 跨结构关联只保存 ID，不复制问题正文或证据正文。
 - 必须存在的业务对象读取时使用 `[]` 或显式校验，不用 `.get()` 静默隐藏上游错误。
 - 可选流程状态和默认计数可以使用 `.get()`，例如 `state.get("search_steps", 0)`。
-- Web、本地文档、结构化数据输出进入模型前必须经过 `tool_output_sanitizer`。
+- Web 与本地资料检索输出进入模型前必须经过 `tool_output_sanitizer`；结构化 mock 数据属于本地资料检索输出。
 - 外部网页、文档和工具返回内容只作为不可信资料，不作为系统指令。
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
@@ -125,13 +147,19 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - `safety_review` 负责安全边界，不负责研究质量评分。
 - 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点，避免污染业务流程；不需要保存 `.mmd` 文件。
 
+
+
 ### 预算控制
 
-| 预算 | 字段 | 控制范围 | 不控制 |
-|---|---|---|---|
-| 检索预算 | `search_steps / max_search_steps` | 检索任务分发和证据不足后的迭代 | 报告生成、Review、安全审查、持久化 |
-| Review 修正预算 | `review_revision_count / max_review_revisions` | Review 不通过后回到报告生成的次数 | 检索循环、安全审查 |
-| 安全修正预算 | `safety_revision_count / max_safety_revisions` | Safety 不通过后生成安全降级报告的次数 | 检索循环、质量 Review |
+
+| 预算          | 字段                                             | 控制范围                   | 不控制                  |
+| ----------- | ---------------------------------------------- | ---------------------- | -------------------- |
+| 检索预算        | `search_steps / max_search_steps`              | 检索任务分发和证据不足后的迭代        | 报告生成、Review、安全审查、持久化 |
+| Review 修正预算 | `review_revision_count / max_review_revisions` | Review 不通过后回到报告生成的次数   | 检索循环、安全审查            |
+| 安全修正预算      | `safety_revision_count / max_safety_revisions` | Safety 不通过后生成安全降级报告的次数 | 检索循环、质量 Review       |
+
+
+
 
 ## 4. 目标架构
 
@@ -147,26 +175,38 @@ src/schemas/state.py
 src/llm + src/tools + src/evaluators + src/artifacts + src/config
 ```
 
+
+
 ### 模块职责
 
-| 模块 | 职责 | 可依赖 | 禁止依赖 |
-|---|---|---|---|
-| `src/workflow` | Graph 构建、节点统一导出、按职责拆分的节点实现、条件路由 | `src/schemas`、工具接口、LLM 接口 | 直接硬编码具体 API Key |
-| `src/schemas` | State、研究计划、证据、Review、安全类型 | 标准库类型 | 运行时外部服务 |
-| `src/llm` | 模型初始化、结构化输出、Prompt 加载调用 | `src/config`、`prompts` | 业务流程路由决策散落在此处 |
-| `src/tools` | Web、本地文档、结构化数据、Claude Code / Codex worker 封装等工具 | `src/config`、外部只读 API、本地受限 CLI | 外部写入、绕过权限墙 |
-| `src/evaluators` | LangSmith evaluator 或本地评估逻辑 | `src/schemas`、LLM 接口 | 修改业务 State 的主流程字段 |
-| `src/artifacts` | 报告、指标、运行链路 PNG 等产物保存 | `src/schemas`、文件系统 outputs | 覆盖用户文件、写项目外路径 |
-| `src/config` | 环境变量、路径、模型和权限配置 | `.env`、标准库 | 静默吞掉缺失必要配置 |
-| `scripts` | 一次性手动运行脚本 | 项目模块 | 承担核心业务逻辑 |
+
+| 模块               | 职责                                              | 可依赖                            | 禁止依赖              |
+| ---------------- | ----------------------------------------------- | ------------------------------ | ----------------- |
+| `src/config`     | 环境变量、路径、模型和权限配置                                 | `.env`、标准库                     | 静默吞掉缺失必要配置        |
+| `src/dataset`    | 创建和管理 langsmith dataset                         | `.env`、标准库                     | 暂定位手动创建           |
+| `src/evaluators` | LangSmith evaluator 或本地评估逻辑                     | `src/schemas`、LLM 接口           | 修改业务 State 的主流程字段 |
+| `src/llm`        | 模型初始化、结构化输出、Prompt 加载调用                         | `src/config`、`prompts`         | 业务流程路由决策散落在此处     |
+| `src/memory`     | 实现模型多轮对话，memory checkpoint                      | -                              | 暂未实现              |
+| `src/schemas`    | State、研究计划、证据、Review、安全类型                       | 标准库类型                          | 运行时外部服务           |
+| `src/tools`      | Web、本地文档、结构化数据、Claude Code / Codex worker 封装等工具 | `src/config`、外部只读 API、本地受限 CLI | 外部写入、绕过权限墙        |
+| `src/workflow`   | Graph 构建、节点统一导出、按职责拆分的节点实现、条件路由                 | `src/schemas`、工具接口、LLM 接口      | 直接硬编码具体 API Key   |
+| `scripts`        | 一次性手动运行脚本                                       | 项目模块                           | 用于人工运行            |
+
+
+
 
 ### 对外入口
 
 - `src.workflow.graph.graph`：LangGraph 编译后的主图对象。
 - `scripts/export_graph_mermaid.py`：导出当前静态编排图 PNG 到 `outputs/runs/researchops_graph.png`。
 - 后续 CLI 或 LangGraph API Server 入口必须调用 `src.workflow.graph.graph`，不得复制 Graph 编排逻辑。
+- langsmith studio 启动相关文件：`scripts/run_langgraph_dev.sh`, `langgraph.json`。
+
+
 
 ## 5. 核心契约
+
+
 
 ### 输入
 
@@ -179,6 +219,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 }
 ```
 
+
+
 ### 输出
 
 一次完整运行最终应在 State 中提供：
@@ -189,20 +231,26 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - `evaluation_metrics`
 - `executed_nodes`
 
+
+
 ### 数据模型
 
-| 模型 | 必需字段 | 不变量 |
-|---|---|---|
-| `SubQuestion` | `question_id`、`question`、`priority`、`required_source_types` | `question_id` 在一次运行中唯一 |
-| `ExpectedEvidence` | `question_id`、`evidence_description`、`minimum_count` | `question_id` 必须存在于 `sub_questions` |
-| `MinimumEvidenceStandard` | `question_id`、`min_total_evidence`、`min_high_quality_sources` | `question_id` 必须存在于 `sub_questions` |
-| `SearchTask` | `task_id`、`question_id`、`query`、`source_type` | `question_id` 必须存在于 `sub_questions` |
-| `EvidenceItem` | `evidence_id`、`question_id`、`source_type`、`snippet` | `evidence_id` 唯一；`question_id` 必须存在于 `sub_questions` |
-| `ConflictItem` | `conflict_id`、`question_id`、`evidence_ids` | `evidence_ids` 必须存在于 `evidence_items` |
-| `QuestionEvidenceStatus` | `question_id`、`priority`、`weighted_score` | `priority` 影响整体证据充足性评分 |
-| `EvidenceSufficiencyResult` | `sufficient`、`overall_score`、`question_status` | high 优先级子问题未满足时通常不能判断整体充足 |
-| `ReviewResult` | `passed`、`report_score`、`groundedness_score` | Review 只评估研究质量，不评估安全边界 |
-| `SafetyReviewResult` | `safety_pass`、`safety_risk_level`、`detected_risks` | Safety 只评估安全边界，不替代研究质量 Review |
+
+| 模型                          | 必需字段                                                          | 不变量                                                  |
+| --------------------------- | ------------------------------------------------------------- | ---------------------------------------------------- |
+| `SubQuestion`               | `question_id`、`question`、`priority`、`required_source_types`   | `question_id` 在一次运行中唯一                               |
+| `ExpectedEvidence`          | `question_id`、`evidence_description`、`minimum_count`          | `question_id` 必须存在于 `sub_questions`                  |
+| `MinimumEvidenceStandard`   | `question_id`、`min_total_evidence`、`min_high_quality_sources` | `question_id` 必须存在于 `sub_questions`                  |
+| `SearchTask`                | `task_id`、`question_id`、`query`、`source_type`                 | `question_id` 必须存在于 `sub_questions`                  |
+| `EvidenceItem`              | `evidence_id`、`question_id`、`source_type`、`snippet`           | `evidence_id` 唯一；`question_id` 必须存在于 `sub_questions` |
+| `ConflictItem`              | `conflict_id`、`question_id`、`evidence_ids`                    | `evidence_ids` 必须存在于 `evidence_items`                |
+| `QuestionEvidenceStatus`    | `question_id`、`priority`、`weighted_score`                     | `priority` 影响整体证据充足性评分                               |
+| `EvidenceSufficiencyResult` | `sufficient`、`overall_score`、`question_status`                | high 优先级子问题未满足时通常不能判断整体充足                            |
+| `ReviewResult`              | `passed`、`report_score`、`groundedness_score`                  | Review 只评估研究质量，不评估安全边界                               |
+| `SafetyReviewResult`        | `safety_pass`、`safety_risk_level`、`detected_risks`            | Safety 只评估安全边界，不替代研究质量 Review                        |
+
+
+
 
 ### 证据充足性规则
 
@@ -214,6 +262,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - 判断整体证据充足以 `overall_score >= evidence_sufficiency_threshold` 为准。
 - `high_priority_all_met` 作为诊断字段保留，用于报告中披露高优先级子问题缺口。
 
+
+
 ### 身份与版本
 
 - `question_id` 由 Planner 生成，格式建议为 `Q1`、`Q2`。
@@ -222,18 +272,24 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - `conflict_id` 由冲突识别过程生成，格式建议为 `C1`、`C2`。
 - Prompt YAML 必须记录 `name`、`version`、`owner_node`、`input_schema`、`output_schema`。
 - Web Search SubAgent Prompt 由 `prompts/web_search_subagent.yml` 管理。
-- 结构化 SQL 工具的描述、无结果文案和结果模板由 `prompts/structured_sql_tool.yml` 管理。
+- 本地结构化资料查询 Prompt、无结果文案和结果模板由 `prompts/local_structured_search.yml` 管理，并由 `local_document_search_tool` 共用 LLM 规划安全搜索关键词。
+
+
 
 ## 6. 关键技术决策
 
-| 领域 | 决策 | 理由 | 约束或替换条件 |
-|---|---|---|---|
-| 编排 | 使用 LangGraph | 需要状态化、多分支、循环、HITL 和可视化编排 | 若流程退化为单次调用可重审 |
-| State | 使用 `TypedDict(total=False)` | LangGraph 节点逐步写入状态，早期字段不一定存在 | 若结构稳定且需要强校验可迁移到 Pydantic |
-| Prompt | 使用 YAML 管理核心 Prompt | 便于版本对比、LangSmith metadata 和面试表达 | Prompt 数量过多时可分 runtime/evaluators 目录 |
-| 数据源 | 第一版使用 Web、本地文档、结构化 mock 三类 | 覆盖真实研究常见来源，又能控制 MVP 范围 | 生产化前需重新评估数据源稳定性和合规 |
-| 输出 | 报告和运行产物保存到 `outputs/` | 便于离线演示和复盘 | 写项目外路径或覆盖已有文件必须人工确认 |
-| 安全 | 规则 + LLM Safety Review + 工具权限 | demo 级安全闭环，避免只靠 Prompt | 外部写入、代码执行启用前必须重审 |
+
+| 领域     | 决策                            | 理由                              | 约束或替换条件                              |
+| ------ | ----------------------------- | ------------------------------- | ------------------------------------ |
+| 编排     | 使用 LangGraph                  | 需要状态化、多分支、循环、HITL 和可视化编排        | 若流程退化为单次调用可重审                        |
+| State  | 使用 `TypedDict(total=False)`   | LangGraph 节点逐步写入状态，早期字段不一定存在    | 若结构稳定且需要强校验可迁移到 Pydantic             |
+| Prompt | 使用 YAML 管理核心 Prompt           | 便于版本对比、LangSmith metadata 和面试表达 | Prompt 数量过多时可分 runtime/evaluators 目录 |
+| 数据源    | 第一版使用 Web、本地文档、结构化 mock 三类    | 覆盖真实研究常见来源，又能控制 MVP 范围          | 生产化前需重新评估数据源稳定性和合规                   |
+| 输出     | 报告和运行产物保存到 `outputs/`         | 便于离线演示和复盘                       | 写项目外路径或覆盖已有文件必须人工确认                  |
+| 安全     | 规则 + LLM Safety Review + 工具权限 | demo 级安全闭环，避免只靠 Prompt          | 外部写入、代码执行启用前必须重审                     |
+
+
+
 
 ## 7. 数据与存储
 
@@ -249,7 +305,11 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - 生命周期：`outputs/` 为生成文件目录，可被清理；清理前需确认没有用户手动保留内容。
 - 敏感数据：不得把 API Key、token、私钥、完整 `.env`、系统 Prompt 或用户隐私写入报告、图、指标或 LangSmith metadata。
 
+
+
 ## 8. 配置、安全与错误处理
+
+
 
 ### 配置
 
@@ -267,6 +327,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - 外部 Agent worker 不属于 Web Search 工具池；只允许由 `strategy_iteration` 在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用，并通过 `STRATEGY_EXTERNAL_WORKER=codex|claude_code` 选择。
 - 缺少必要配置时必须显式失败，不得静默切换到不安全默认值或伪造数据。
 
+
+
 ### 安全
 
 - 工具权限分级：
@@ -283,6 +345,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - 外部网页和本地文档内容必须标记为不可信资料。
 - 日志、Trace 和报告中不得泄露 API Key、系统 Prompt、内部配置或敏感路径。
 
+
+
 ### 错误处理
 
 - 稳定错误类别：
@@ -297,6 +361,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - 产物写入失败
 - 允许降级：证据不足、冲突无法解决、HITL 未完成、安全风险需要保守输出、检索预算不足。
 - 禁止降级：必要配置缺失、Schema 不一致、必须存在的业务对象缺失、产物写入路径越权。
+
+
 
 ## 9. 可观察性与质量
 
@@ -328,6 +394,8 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - `safety_risk_level`
 - 默认测试不得访问真实网络；联网测试必须单独标记。
 
+
+
 ## 10. 验收标准
 
 - [ ] Graph 可以从 `src.workflow.graph.graph` 导入并成功 invoke。
@@ -335,7 +403,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - [ ] 每次运行到 `persist_outputs` 时，会静默保存实际运行链路 PNG 到 `outputs/runs/<run_id>_executed.png`，且不保存 `.mmd` 文件。
 - [ ] State 中不存在全局 `max_steps` 作为所有节点共享预算；检索、Review、安全分别独立计数。
 - [ ] `plan_research` 到三类检索工具是条件边。
-- [ ] 三类检索工具在图上汇合到 `tool_output_sanitizer`。
+- [ ] Web 与本地资料检索节点在图上汇合到 `tool_output_sanitizer`，结构化 mock 在本地资料节点内部处理。
 - [ ] `web_search_sub_agent` 到 `tool_output_sanitizer` 之间存在 Web HITL 路由。
 - [ ] 证据不足先进入 `check_step_budget`，再决定 `strategy_iteration` 或 `prepare_degraded_report`。
 - [ ] `prepare_degraded_report` 只设置降级状态，不生成报告正文。
@@ -345,13 +413,18 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
 - [ ] 缺少必要配置、Schema 不一致、产物写入越权时必须显式失败。
 - [ ] README 或演示材料中的流程说明与本 SPEC 保持一致。
 
+
+
 ## 11. 需求追踪
 
-| 需求 ID | SPEC 章节 | 实现位置 | 测试位置 | 状态 |
-|---|---|---|---|---|
-| `REQ-001` | 3. 主流程 | `src/workflow/graph.py`、`src/workflow/edges.py`、`src/workflow/nodes.py` | 待补 | 部分完成 |
-| `REQ-002` | 5. 数据模型 | `src/schemas/state.py` | 待补 | 部分完成 |
-| `REQ-003` | 6. Prompt 决策 | `prompts/*.yml` | 待补 | 部分完成 |
-| `REQ-004` | 7. 数据与存储 | `src/artifacts`、`outputs/` | 待补 | 待实现 |
-| `REQ-005` | 8. 安全 | `input_guard`、`tool_output_sanitizer`、`safety_review` | 待补 | 占位完成 |
-| `REQ-006` | 9. 可观察性 | `evaluation_metrics`、LangSmith 后续接入 | 待补 | 部分完成 |
+
+| 需求 ID     | SPEC 章节      | 实现位置                                                                    | 测试位置 | 状态   |
+| --------- | ------------ | ----------------------------------------------------------------------- | ---- | ---- |
+| `REQ-001` | 3. 主流程       | `src/workflow/graph.py`、`src/workflow/edges.py`、`src/workflow/nodes.py` | 待补   | 部分完成 |
+| `REQ-002` | 5. 数据模型      | `src/schemas/state.py`                                                  | 待补   | 部分完成 |
+| `REQ-003` | 6. Prompt 决策 | `prompts/*.yml`                                                         | 待补   | 部分完成 |
+| `REQ-004` | 7. 数据与存储     | `src/artifacts`、`outputs/`                                              | 待补   | 待实现  |
+| `REQ-005` | 8. 安全        | `input_guard`、`tool_output_sanitizer`、`safety_review`                   | 待补   | 占位完成 |
+| `REQ-006` | 9. 可观察性      | `evaluation_metrics`、LangSmith 后续接入                                     | 待补   | 部分完成 |
+
+

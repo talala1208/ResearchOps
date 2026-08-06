@@ -35,8 +35,8 @@ NODE_CLASSES = {
     ],
     "tool": [
         "web_search_sub_agent",
+        "web_search_result_ready",
         "local_document_search_tool",
-        "query_structured_data",
     ],
     "evidence": [
         "deduplicate_and_cluster",

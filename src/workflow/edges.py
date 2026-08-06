@@ -11,8 +11,8 @@ from src.schemas.state import ResearchState
 INPUT_GUARD = "input_guard"
 PLAN_RESEARCH = "plan_research"
 WEB_SEARCH_SUB_AGENT = "web_search_sub_agent"
+WEB_SEARCH_RESULT_READY = "web_search_result_ready"
 LOCAL_DOCUMENT_SEARCH_TOOL = "local_document_search_tool"
-QUERY_STRUCTURED_DATA = "query_structured_data"
 TOOL_OUTPUT_SANITIZER = "tool_output_sanitizer"
 DEDUPLICATE_AND_CLUSTER = "deduplicate_and_cluster"
 EVALUATE_EVIDENCE_QUALITY = "evaluate_evidence_quality"
@@ -41,16 +41,14 @@ def route_after_input_guard(state: ResearchState) -> str:
 def route_after_plan_research(state: ResearchState) -> list[str]:
     """检索任务分发后的条件路由。
 
-    当前图里三类检索节点需要并行汇聚到同一个清洗节点。
-    为了避免某个动态分支单独提前触发 `tool_output_sanitizer`，这里固定启动
-    三个检索节点；每个节点内部再按 `search_tasks.source_type` 过滤自己的任务。
-    没有任务的检索节点只会写入空结果。
+    当前图里 Web 检索和本地资料检索两个节点需要并行汇聚到同一个清洗节点。
+    结构化 mock 数据也属于本地资料检索能力，由 `local_document_search_tool`
+    根据 `search_tasks.source_type` 在内部选择 Markdown 关键词搜索或结构化 SQL 查询。
     """
 
     return [
         WEB_SEARCH_SUB_AGENT,
         LOCAL_DOCUMENT_SEARCH_TOOL,
-        QUERY_STRUCTURED_DATA,
     ]
 
 
@@ -62,19 +60,7 @@ def route_after_web_search(state: ResearchState) -> str:
 
     if state.get("web_hitl_required", False):
         return WEB_SEARCH_HITL_REQUEST
-    return TOOL_OUTPUT_SANITIZER
-
-
-def route_after_tool_output_sanitizer(state: ResearchState) -> str:
-    """工具输出统一清洗后的 Web HITL 路由。
-
-    Web / Local / Structured 三类工具先汇聚一次，再决定是否进入 Web HITL，
-    避免并行分支重复触发后续证据节点。
-    """
-
-    if state.get("web_hitl_required", False):
-        return WEB_SEARCH_HITL_REQUEST
-    return DEDUPLICATE_AND_CLUSTER
+    return WEB_SEARCH_RESULT_READY
 
 
 def route_after_evidence_quality(state: ResearchState) -> str:
@@ -156,30 +142,29 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
         },
     )
 
-    # 三类检索能力是条件分发，不是每次运行都必然触发。
+    # Web 与本地资料检索能力并行触发；结构化 mock 在本地资料节点内部处理。
     builder.add_conditional_edges(
         PLAN_RESEARCH,
         route_after_plan_research,
         {
             WEB_SEARCH_SUB_AGENT: WEB_SEARCH_SUB_AGENT,
             LOCAL_DOCUMENT_SEARCH_TOOL: LOCAL_DOCUMENT_SEARCH_TOOL,
-            QUERY_STRUCTURED_DATA: QUERY_STRUCTURED_DATA,
         },
     )
-    builder.add_edge(
-        [WEB_SEARCH_SUB_AGENT, LOCAL_DOCUMENT_SEARCH_TOOL, QUERY_STRUCTURED_DATA],
-        TOOL_OUTPUT_SANITIZER,
-    )
-
     builder.add_conditional_edges(
-        TOOL_OUTPUT_SANITIZER,
-        route_after_tool_output_sanitizer,
+        WEB_SEARCH_SUB_AGENT,
+        route_after_web_search,
         {
             WEB_SEARCH_HITL_REQUEST: WEB_SEARCH_HITL_REQUEST,
-            DEDUPLICATE_AND_CLUSTER: DEDUPLICATE_AND_CLUSTER,
+            WEB_SEARCH_RESULT_READY: WEB_SEARCH_RESULT_READY,
         },
     )
-    builder.add_edge(WEB_SEARCH_HITL_REQUEST, DEDUPLICATE_AND_CLUSTER)
+    builder.add_edge(WEB_SEARCH_HITL_REQUEST, WEB_SEARCH_RESULT_READY)
+    builder.add_edge(
+        [WEB_SEARCH_RESULT_READY, LOCAL_DOCUMENT_SEARCH_TOOL],
+        TOOL_OUTPUT_SANITIZER,
+    )
+    builder.add_edge(TOOL_OUTPUT_SANITIZER, DEDUPLICATE_AND_CLUSTER)
     builder.add_edge(DEDUPLICATE_AND_CLUSTER, EVALUATE_EVIDENCE_QUALITY)
     builder.add_conditional_edges(
         EVALUATE_EVIDENCE_QUALITY,

@@ -25,9 +25,9 @@ from src.workflow.report_nodes import (
 )
 from src.workflow.search_nodes import (
     local_document_search_tool,
-    query_structured_data,
     tool_output_sanitizer,
     web_search_hitl_request,
+    web_search_result_ready,
     web_search_sub_agent,
 )
 
@@ -43,12 +43,12 @@ __all__ = [
     "local_document_search_tool",
     "persist_outputs",
     "prepare_degraded_report",
-    "query_structured_data",
     "request_human_review",
     "review_research_report",
     "safety_review",
     "strategy_iteration",
     "tool_output_sanitizer",
     "web_search_hitl_request",
+    "web_search_result_ready",
     "web_search_sub_agent",
 ]

@@ -2,6 +2,27 @@ from langsmith import Client
 
 client = Client()
 
+
+def build_inputs(examples_to_convert, input_key: str = "question"):
+    """兼容测试和简单追加场景：从字符串或二元组提取问题。"""
+
+    inputs = []
+    for example in examples_to_convert:
+        input_prompt = example[0] if isinstance(example, tuple) else example
+        if input_prompt:
+            inputs.append({input_key: str(input_prompt)})
+    return inputs
+
+
+def upload_examples() -> None:
+    """向指定 LangSmith Dataset 追加当前 examples。"""
+
+    client.create_examples(
+        examples=examples,
+        dataset_id=dataset_id,
+    )
+
+
 # 从 langsmith 粘贴
 dataset_id = "真实的-dataset-id"
 
@@ -118,7 +139,5 @@ examples = [
     },
 ]
 
-client.create_examples(
-    examples=examples,
-    dataset_id=dataset_id,
-)
+if __name__ == "__main__":
+    upload_examples()

@@ -1,8 +1,4 @@
-"""检索工具与工具输出清洗节点。
-
-当前实现为替代数据源版本：不联网、不读取真实文件、不调用外部工具，
-只根据 `search_tasks` 生成可预测的候选结果，供后续节点先跑通数据流。
-"""
+"""Web Search、本地资料检索与工具输出清洗节点。"""
 
 from __future__ import annotations
 
@@ -28,7 +24,8 @@ WEB_SOURCE_TYPES = {
     "product_directory",
     "traffic_data",
 }
-LOCAL_SOURCE_TYPES = {"local_document"}
+LOCAL_SOURCE_TYPES = {"local_document", "structured_mock"}
+MARKDOWN_SOURCE_TYPES = {"local_document"}
 STRUCTURED_SOURCE_TYPES = {"structured_mock"}
 
 
@@ -194,76 +191,88 @@ def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
     }
 
 
+def web_search_result_ready(state: ResearchState) -> dict[str, Any]:
+    """Web Search 分支完成节点。
+
+    该节点用于让 `web_search_sub_agent -> 可选 web_search_hitl_request` 先完成，
+    再和 `local_document_search_tool` 汇聚到 `tool_output_sanitizer`。
+    """
+
+    return record_node(state, "web_search_result_ready")
+
+
+def _query_markdown_task(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """执行本地 Markdown 关键词搜索。"""
+
+    try:
+        return query_local_documents_for_task(task)
+    except Exception as exc:  # noqa: BLE001 - 工具失败要显式暴露给后续节点
+        return [
+            {
+                **_build_placeholder_result(
+                    task=task,
+                    collected_by="local_document_search",
+                    source_name="local_markdown_documents",
+                    title_prefix="本地 Markdown 搜索失败",
+                    url_or_path_prefix="placeholder://local_document/error",
+                ),
+                "blocked_reason": str(exc),
+                "local_payload": {"error": str(exc)},
+            }
+        ]
+
+
+def _query_structured_task(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """执行本地结构化资料查询。"""
+
+    task_results = query_structured_products_for_task(task)
+    if task_results:
+        return task_results
+    return [
+        {
+            **_build_placeholder_result(
+                task=task,
+                collected_by="local_structured_search",
+                source_name="local_mock_ai_products",
+                title_prefix="本地结构化资料无匹配",
+                url_or_path_prefix="placeholder://structured_mock/no_match",
+            ),
+            "structured_payload": {
+                "matched_product_count": 0,
+                "query": task["query"],
+                "reason": "本地结构化 mock 数据无匹配记录",
+            },
+        }
+    ]
+
+
 def local_document_search_tool(state: ResearchState) -> dict[str, Any]:
-    """Local Document Search 代码实现。
+    """本地资料检索节点。
 
     读取：`search_tasks`
     写入：`local_document_results`
 
-    该节点只读 `LOCAL_DOCUMENTS_BASE_PATH` 下的 Markdown 文件，不调用 LLM。
+    - `local_document`：搜索 `LOCAL_DOCUMENTS_BASE_PATH` 下的 Markdown 文件。
+    - `structured_mock`：查询本地结构化 mock 数据。
+
+    结构化数据也属于本地资料检索能力；后续 PDF 等本地资料类型也应
+    继续并入该节点，而不是新增独立 Graph 节点。
     """
 
     tasks = _tasks_by_source_type(state, LOCAL_SOURCE_TYPES)
     results = []
     for task in tasks:
-        try:
-            task_results = query_local_documents_for_task(task)
-        except Exception as exc:  # noqa: BLE001 - 工具失败要显式暴露给后续节点
-            task_results = [
-                {
-                    **_build_placeholder_result(
-                        task=task,
-                        collected_by="local_document_search",
-                        source_name="local_markdown_documents",
-                        title_prefix="本地文档搜索失败",
-                        url_or_path_prefix="placeholder://local_document/error",
-                    ),
-                    "blocked_reason": str(exc),
-                    "local_payload": {"error": str(exc)},
-                }
-            ]
-        results.extend(task_results)
+        source_type = task["source_type"]
+        if source_type in MARKDOWN_SOURCE_TYPES:
+            results.extend(_query_markdown_task(task))
+        elif source_type in STRUCTURED_SOURCE_TYPES:
+            results.extend(_query_structured_task(task))
+        else:
+            raise ValueError(f"local_document_search_tool 不支持的 source_type：{source_type}")
 
     return {
         **record_node(state, "local_document_search_tool"),
         "local_document_results": results,
-    }
-
-
-def query_structured_data(state: ResearchState) -> dict[str, Any]:
-    """结构化数据查询工具节点。
-
-    读取：`search_tasks`
-    写入：`structured_data_results`
-    """
-
-    tasks = _tasks_by_source_type(state, STRUCTURED_SOURCE_TYPES)
-    results = []
-    for task in tasks:
-        task_results = query_structured_products_for_task(task)
-        if task_results:
-            results.extend(task_results)
-            continue
-        results.append(
-            {
-                **_build_placeholder_result(
-                    task=task,
-                    collected_by="query_structured_data",
-                    source_name="local_mock_ai_products",
-                    title_prefix="结构化 mock 查询无匹配",
-                    url_or_path_prefix="placeholder://structured_mock/no_match",
-                ),
-                "structured_payload": {
-                    "matched_product_count": 0,
-                    "query": task["query"],
-                    "reason": "本地结构化 mock 数据无匹配记录",
-                },
-            }
-        )
-
-    return {
-        **record_node(state, "query_structured_data"),
-        "structured_data_results": results,
     }
 
 
@@ -273,7 +282,6 @@ def tool_output_sanitizer(state: ResearchState) -> dict[str, Any]:
     raw_results = []
     raw_results.extend(state.get("web_search_results", []))
     raw_results.extend(state.get("local_document_results", []))
-    raw_results.extend(state.get("structured_data_results", []))
 
     sanitized_results = [
         {

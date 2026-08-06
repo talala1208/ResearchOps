@@ -244,7 +244,6 @@ class ResearchState(TypedDict, total=False):
     web_hitl_reason: str | None
     web_hitl_decisions: list[dict]
     local_document_results: list[dict]
-    structured_data_results: list[dict]
     raw_search_results: list[dict]
     sanitized_results: list[dict]
 
