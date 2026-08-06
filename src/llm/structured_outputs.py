@@ -108,6 +108,27 @@ class WebSearchResultOutput(BaseModel):
     published_at: str | None = None
     requires_login: bool = False
     blocked_reason: str | None = None
+    relevance_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="候选结果对当前子问题的相关性评分。",
+    )
+    answer_coverage_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="候选结果覆盖当前子问题答案要点的程度。",
+    )
+    source_confidence_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="候选结果来源可信度初判。",
+    )
+    freshness_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="候选结果时效性评分。",
+    )
+    score_reason: str = Field(description="候选分数的简短依据。")
 
 
 class WebSearchSubAgentResultOutput(BaseModel):

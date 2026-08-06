@@ -99,10 +99,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             "query": "https://docs.cursor.com",
             "source_type": "official_docs",
         }
-        with (
-            patch.object(web_search_subagent, "_call_tool") as call_tool,
-            patch.dict("os.environ", {"ENABLE_BROWSER_MCP_TOOLS": "true"}),
-        ):
+        with patch.object(web_search_subagent, "_call_tool") as call_tool:
             call_tool.side_effect = lambda name, tool_obj, payload: {
                 "tool_name": name,
                 "ok": True,
@@ -153,7 +150,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
 
         with (
             patch.object(web_search_subagent, "_call_tool", side_effect=fake_call_tool),
-            patch.dict("os.environ", {"WEB_SEARCH_FETCH_SERPAPI_TOP_N": "2", "ENABLE_BROWSER_MCP_TOOLS": "true"}),
+            patch.dict("os.environ", {"WEB_SEARCH_FETCH_SERPAPI_TOP_N": "2"}),
         ):
             outputs = web_search_subagent._collect_web_tool_outputs(task)
 
@@ -161,6 +158,88 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertIn("playwright_mcp_fetch_serpapi_result_page_1", tool_names)
         self.assertIn("playwright_mcp_fetch_serpapi_result_page_2", tool_names)
         self.assertNotIn("playwright_mcp_fetch_serpapi_result_page_3", tool_names)
+
+    def test_url_query_and_serpapi_fetch_can_happen_together(self) -> None:
+        """query URL 抓取和 SerpAPI 前 N 条页面抓取可以同时发生。"""
+
+        task = {
+            "task_id": "T1",
+            "question_id": "Q1",
+            "query": "https://docs.cursor.com Cursor docs",
+            "source_type": "official_docs",
+        }
+
+        def fake_call_tool(name, tool_obj, payload):
+            if name == "serp_api_search":
+                return {
+                    "tool_name": name,
+                    "ok": True,
+                    "input": payload,
+                    "output": {
+                        "results": [
+                            {"url": "https://example.com/a", "title": "A"},
+                        ]
+                    },
+                    "error": None,
+                }
+            return {
+                "tool_name": name,
+                "ok": True,
+                "input": payload,
+                "output": {},
+                "error": None,
+            }
+
+        with (
+            patch.object(web_search_subagent, "_call_tool", side_effect=fake_call_tool),
+            patch.dict("os.environ", {"WEB_SEARCH_FETCH_SERPAPI_TOP_N": "1"}),
+        ):
+            outputs = web_search_subagent._collect_web_tool_outputs(task)
+
+        tool_names = [item["tool_name"] for item in outputs]
+        self.assertIn("playwright_mcp_fetch_page", tool_names)
+        self.assertIn("playwright_mcp_fetch_serpapi_result_page_1", tool_names)
+
+    def test_serpapi_fetch_top_n_zero_disables_serpapi_page_fetch_only(self) -> None:
+        """WEB_SEARCH_FETCH_SERPAPI_TOP_N=0 只关闭 SerpAPI 结果页抓取。"""
+
+        task = {
+            "task_id": "T1",
+            "question_id": "Q1",
+            "query": "https://docs.cursor.com Cursor docs",
+            "source_type": "official_docs",
+        }
+
+        def fake_call_tool(name, tool_obj, payload):
+            if name == "serp_api_search":
+                return {
+                    "tool_name": name,
+                    "ok": True,
+                    "input": payload,
+                    "output": {
+                        "results": [
+                            {"url": "https://example.com/a", "title": "A"},
+                        ]
+                    },
+                    "error": None,
+                }
+            return {
+                "tool_name": name,
+                "ok": True,
+                "input": payload,
+                "output": {},
+                "error": None,
+            }
+
+        with (
+            patch.object(web_search_subagent, "_call_tool", side_effect=fake_call_tool),
+            patch.dict("os.environ", {"WEB_SEARCH_FETCH_SERPAPI_TOP_N": "0"}),
+        ):
+            outputs = web_search_subagent._collect_web_tool_outputs(task)
+
+        tool_names = [item["tool_name"] for item in outputs]
+        self.assertIn("playwright_mcp_fetch_page", tool_names)
+        self.assertNotIn("playwright_mcp_fetch_serpapi_result_page_1", tool_names)
 
     def test_dispatch_does_not_call_external_worker_in_web_search(self) -> None:
         """Web Search 工具池不包含 Claude 或 Codex。"""

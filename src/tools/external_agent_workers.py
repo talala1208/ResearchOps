@@ -83,7 +83,7 @@ def _env_enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _compact_prompt(prompt: str, limit: int = 4000) -> str:
+def _compact_prompt(prompt: str, limit: int = 16000) -> str:
     """限制传给外部 worker 的上下文长度。"""
 
     normalized = "\n".join(line.rstrip() for line in prompt.strip().splitlines())

@@ -16,6 +16,7 @@ system_prompt: |
 
   约束：
   - 只生成迭代检索任务，不执行检索。
+  - 若有外部 worker 建议，严格遵循其建议；若没有，则根据当前检索轮次、分发模式和上下文生成任务。
   - task_id 必须使用 T1、T2、T3 这种稳定格式。
   - question_id 必须来自输入中的 active_question_ids；如果 active_question_ids 为空，则为所有子问题生成任务。
   - 每个 high 子问题至少生成 2 个不同 source_type 的任务。

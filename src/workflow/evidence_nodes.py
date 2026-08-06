@@ -74,15 +74,43 @@ def _stable_unique_results(results: list[dict[str, Any]]) -> list[dict[str, Any]
     return unique_results
 
 
+def _score_or_default(value: Any, default: float) -> float:
+    """读取 0 到 1 之间的候选分；缺失或非法时使用默认分。"""
+
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(score, 1.0))
+
+
 def _score_result(result: dict[str, Any]) -> dict[str, float]:
     """用确定性规则为替代结果打分。"""
 
     source_type = result["source_type"]
-    authority_score = SOURCE_AUTHORITY_SCORE.get(source_type, 0.5)
-    freshness_score = 0.6 if result.get("published_at") is None else 0.8
-    relevance_score = 0.75 if result.get("snippet") else 0.0
+    authority_score = _score_or_default(
+        result.get("source_confidence_score"),
+        SOURCE_AUTHORITY_SCORE.get(source_type, 0.5),
+    )
+    freshness_score = _score_or_default(
+        result.get("freshness_score"),
+        0.6 if result.get("published_at") is None else 0.8,
+    )
+    relevance_score = _score_or_default(
+        result.get("relevance_score"),
+        0.75 if result.get("snippet") else 0.0,
+    )
+    answer_coverage_score = _score_or_default(
+        result.get("answer_coverage_score"),
+        relevance_score,
+    )
     reliability_score = round(
-        authority_score * 0.5 + freshness_score * 0.2 + relevance_score * 0.3,
+        authority_score * 0.35
+        + freshness_score * 0.15
+        + relevance_score * 0.3
+        + answer_coverage_score * 0.2,
         4,
     )
 
@@ -90,6 +118,8 @@ def _score_result(result: dict[str, Any]) -> dict[str, float]:
         "authority_score": authority_score,
         "freshness_score": freshness_score,
         "relevance_score": relevance_score,
+        "answer_coverage_score": answer_coverage_score,
+        "source_confidence_score": authority_score,
         "reliability_score": reliability_score,
     }
 
@@ -168,7 +198,10 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
                 "authority_score": scores["authority_score"],
                 "freshness_score": scores["freshness_score"],
                 "relevance_score": scores["relevance_score"],
+                "answer_coverage_score": scores["answer_coverage_score"],
+                "source_confidence_score": scores["source_confidence_score"],
                 "reliability_score": scores["reliability_score"],
+                "score_reason": candidate.get("score_reason"),
                 "used_in_final_report": False,
             }
             evidence_ids_by_question_id[question_id].append(evidence_id)
@@ -480,7 +513,6 @@ def strategy_iteration(state: ResearchState) -> dict[str, Any]:
         "strategy_suggestions": [
             "为证据不足的 high / medium 子问题优先补充 must_include_source_types",
             "避免重复上一轮完全相同的 query 和 source_type 组合",
-            "如果缺少高质量来源，优先尝试 official_docs、pricing_page、github 或 structured_mock",
         ],
     }
     if _strategy_external_worker_enabled():

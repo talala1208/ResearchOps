@@ -193,17 +193,6 @@ def _serpapi_page_fetch_top_n() -> int:
     return max(0, min(value, 5))
 
 
-def _browser_mcp_enabled() -> bool:
-    """判断是否启用 headless Playwright 页面读取工具。"""
-
-    return os.getenv("ENABLE_BROWSER_MCP_TOOLS", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 @traceable(name="collect_web_tool_outputs", run_type="chain")
 def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     """按固定顺序收集 Web 工具输出，不让 LLM 自行循环调用工具。"""
@@ -230,7 +219,7 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     tool_outputs.append(serpapi_output)
 
     url = _extract_url(query)
-    if url is not None and _browser_mcp_enabled():
+    if url is not None:
         tool_outputs.append(
             _call_tool(
                 "playwright_mcp_fetch_page",
@@ -238,17 +227,20 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
                 {"url": url},
             )
         )
-    elif source_type in WEB_SOURCE_TYPES and _browser_mcp_enabled():
-        for index, result_url in enumerate(
-            _serpapi_result_urls(serpapi_output)[: _serpapi_page_fetch_top_n()],
-            start=1,
-        ):
-            tool_outputs.append(
-                _call_tool(
-                    f"playwright_mcp_fetch_serpapi_result_page_{index}",
-                    playwright_mcp_fetch_page,
-                    {"url": result_url},
-                )
+
+    if source_type in WEB_SOURCE_TYPES:
+        serpapi_fetch_top_n = _serpapi_page_fetch_top_n()
+        if serpapi_fetch_top_n > 0:
+            for index, result_url in enumerate(
+                _serpapi_result_urls(serpapi_output)[:serpapi_fetch_top_n],
+                start=1,
+            ):
+                tool_outputs.append(
+                    _call_tool(
+                        f"playwright_mcp_fetch_serpapi_result_page_{index}",
+                        playwright_mcp_fetch_page,
+                        {"url": result_url},
+                    )
             )
 
     return tool_outputs
@@ -277,6 +269,11 @@ def _fallback_result_from_tool_outputs(
                         "published_at": first_result.get("published_at"),
                         "requires_login": False,
                         "blocked_reason": None,
+                        "relevance_score": 0.6,
+                        "answer_coverage_score": 0.4,
+                        "source_confidence_score": 0.6,
+                        "freshness_score": 0.5,
+                        "score_reason": "LLM 汇总失败时由 SerpAPI 首条结果生成的候选分，可信度较低。",
                     }
                 ],
                 "web_hitl_required": False,
@@ -349,6 +346,12 @@ def _summarize_web_tool_outputs(
         {
             "task_id": task["task_id"],
             "question_id": task["question_id"],
+            "question": task.get("question") or task["query"],
+            "expected_evidence_json": json.dumps(
+                task.get("expected_evidence"),
+                ensure_ascii=False,
+                indent=2,
+            ),
             "query": task["query"],
             "source_type": task["source_type"],
             "tool_outputs_json": json.dumps(tool_outputs, ensure_ascii=False, indent=2),

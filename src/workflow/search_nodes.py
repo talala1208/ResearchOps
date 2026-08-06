@@ -110,9 +110,18 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     results = []
     web_hitl_required = False
     web_hitl_reason = None
+    sub_questions = state.get("sub_questions", {})
+    expected_evidence = state.get("expected_evidence", {})
 
     for task in tasks:
-        subagent_result = run_web_search_subagent_for_task(task)
+        task_for_subagent = dict(task)
+        question_id = task["question_id"]
+        if question_id in sub_questions:
+            task_for_subagent["question"] = sub_questions[question_id]["question"]
+        if question_id in expected_evidence:
+            task_for_subagent["expected_evidence"] = expected_evidence[question_id]
+
+        subagent_result = run_web_search_subagent_for_task(task_for_subagent)
         web_hitl_required = web_hitl_required or bool(
             subagent_result["web_hitl_required"]
         )
@@ -134,6 +143,11 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
                     "is_placeholder": True,
                     "requires_login": bool(item.get("requires_login", False)),
                     "blocked_reason": item.get("blocked_reason"),
+                    "relevance_score": item.get("relevance_score"),
+                    "answer_coverage_score": item.get("answer_coverage_score"),
+                    "source_confidence_score": item.get("source_confidence_score"),
+                    "freshness_score": item.get("freshness_score"),
+                    "score_reason": item.get("score_reason"),
                 }
             )
 
@@ -181,7 +195,7 @@ def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
 
 
 def local_document_search_tool(state: ResearchState) -> dict[str, Any]:
-    """Local Document Search Sub Agent 代码实现。
+    """Local Document Search 代码实现。
 
     读取：`search_tasks`
     写入：`local_document_results`

@@ -87,7 +87,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 |---|---|---|---|
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `plan_research` | `user_query`、预算默认值、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：`research_goal`、`sub_questions`、`expected_evidence`、`minimum_evidence_standard`、`entity_index`、预算初始值、首轮 `search_tasks`；迭代模式：下一轮 `search_tasks`、`entity_index.search_task_ids_by_question_id`、`active_question_ids`、`search_steps`、`search_attempt` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始规划 Prompt 或迭代检索 Prompt；根据 `search_tasks.source_type` 条件触发检索工具 |
-| `web_search_sub_agent` | `search_tasks`、`planning_mode` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为确定性调度 Web 工具 + 单次 LLM 汇总；默认只调用 SerpAPI、Tavily MCP 和 Context7 MCP；SerpAPI 必须直接返回结构化 JSON 搜索结果，包括 `title`、`url`、`snippet`、`published_at`；SerpAPI 搜索摘要只能作为候选入口，默认用 headless + isolated Playwright 抓取前 1 个结果 URL 的页面正文快照；可通过 WEB_SEARCH_FETCH_SERPAPI_TOP_N 调整数量，再交给 LLM 汇总；当 query 中包含 URL 且 ENABLE_BROWSER_MCP_TOOLS=true 时调用 headless Playwright MCP 做页面快照；Chrome DevTools MCP 不参与普通检索，仅在 web_search_hitl_request 中配合 HITL 确认和展示登录 / 权限页面；不使用内部 `create_agent` 自由循环；Claude Code / Codex worker 不进入 Web Search 默认工具池 |
+| `web_search_sub_agent` | `search_tasks`、`planning_mode` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 已改为确定性调度 Web 工具 + 单次 LLM 汇总；默认只调用 SerpAPI、Tavily MCP 和 Context7 MCP；SerpAPI 必须直接返回结构化 JSON 搜索结果，包括 `title`、`url`、`snippet`、`published_at`；SerpAPI 搜索摘要只能作为候选入口，默认用 headless + isolated Playwright 抓取前 1 个结果 URL 的页面正文快照；可通过 WEB_SEARCH_FETCH_SERPAPI_TOP_N 调整数量，再交给 LLM 汇总；当 query 中包含 URL 时必须调用 headless Playwright MCP 抓取该 URL 页面快照；SerpAPI 结果页抓取数量独立由 WEB_SEARCH_FETCH_SERPAPI_TOP_N 控制，0 表示不抓；两者可以同时发生；Chrome DevTools MCP 不参与普通检索，仅在 web_search_hitl_request 中配合 HITL 确认和展示登录 / 权限页面；不使用内部 `create_agent` 自由循环；Claude Code / Codex worker 不进入 Web Search 默认工具池 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH` | `local_document_results` | 已实现只读 Markdown 搜索工具；用于检索本地知识类、经验类、复盘类内容，不调用 LLM |
 | `query_structured_data` | `search_tasks`、结构化 mock 数据配置 | `structured_data_results` | 已接入本地 SQLite 结构化 mock 搜索工具，查询 `data/mock/ai_products.sqlite` |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 当前为替代实现；真实版本 HITL 完成或放弃后进入工具输出清洗 |
@@ -262,7 +262,7 @@ src/llm + src/tools + src/evaluators + src/artifacts + src/config
   - `MAX_SAFETY_REVISIONS`
   - `HITL_CONFLICT_THRESHOLD`
   - `REVIEW_PASS_SCORE`
-- SerpAPI 使用 `SERPAPI_API_KEY`；Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；Playwright MCP 以 headless 模式通过本地 `npx` 启动；Chrome DevTools MCP 仅在 HITL 登录接管场景通过本地 `npx` 启动；密钥不得写入代码或 SPEC。
+- SerpAPI 使用 `SERPAPI_API_KEY`；Tavily MCP 使用 `TAVILY_API_KEY`；Context7 MCP 使用 `CONTEXT7_API_KEY`；Playwright MCP 以 headless 模式通过本地 `npx` 启动；query 含 URL 时必须抓取该 URL，SerpAPI 结果页抓取数量由 `WEB_SEARCH_FETCH_SERPAPI_TOP_N` 管理，0 表示不抓；Chrome DevTools MCP 仅在 HITL 登录接管场景通过本地 `npx` 启动；密钥不得写入代码或 SPEC。
 - Online MCP 单次调用超时由 `ONLINE_MCP_TIMEOUT_SECONDS` 管理，防止 Web Search 长时间阻塞。
 - 外部 Agent worker 不属于 Web Search 工具池；只允许由 `strategy_iteration` 在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用，并通过 `STRATEGY_EXTERNAL_WORKER=codex|claude_code` 选择。
 - 缺少必要配置时必须显式失败，不得静默切换到不安全默认值或伪造数据。

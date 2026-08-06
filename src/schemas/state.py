@@ -85,7 +85,10 @@ class EvidenceItem(TypedDict):
     authority_score: float
     freshness_score: float
     relevance_score: float
+    answer_coverage_score: float
+    source_confidence_score: float
     reliability_score: float
+    score_reason: str | None
     used_in_final_report: bool
 
 
