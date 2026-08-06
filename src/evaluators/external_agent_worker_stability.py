@@ -248,6 +248,12 @@ def external_agent_worker_stability_evaluator(
         "codex": result.codex.model_dump(),
         "blocking_issues": result.blocking_issues,
     }
+    if not result.claude_code.attempted and not result.codex.attempted:
+        return {
+            "key": "external_agent_worker_stability",
+            "value": "not_applicable",
+            "comment": json.dumps(comment, ensure_ascii=False),
+        }
     return {
         "key": "external_agent_worker_stability",
         "score": result.overall_stability_score,

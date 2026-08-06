@@ -19,43 +19,38 @@ class WebToolStabilityEvaluatorTest(unittest.TestCase):
 
         result = evaluate_web_tool_stability_from_outputs(
             {
-                "tool_outputs": [
+                "web_tool_evaluation_records": [
                     {
                         "tool_name": "serp_api_search",
                         "ok": True,
-                        "output": {
-                            "results": [
-                                {
-                                    "title": "LangSmith Docs",
-                                    "url": "https://docs.smith.langchain.com",
-                                    "snippet": "LangSmith documentation",
-                                }
-                            ]
-                        },
+                        "valid_result_count": 1,
+                        "content_length": 0,
+                        "failure_type": None,
+                        "error": None,
                     },
                     {
                         "tool_name": "tavily_mcp_search",
                         "ok": True,
-                        "output": {
-                            "results": [
-                                {
-                                    "title": "LangSmith",
-                                    "url": "https://www.langchain.com/langsmith",
-                                    "content": "LangSmith observability and evaluation platform",
-                                }
-                            ]
-                        },
+                        "valid_result_count": 1,
+                        "content_length": 0,
+                        "failure_type": None,
+                        "error": None,
                     },
                     {
                         "tool_name": "context7_mcp_query",
                         "ok": True,
-                        "output": {"content": "LangSmith tracing and evaluation docs"},
+                        "valid_result_count": 1,
+                        "content_length": 0,
+                        "failure_type": None,
+                        "error": None,
                     },
                     {
                         "tool_name": "playwright_mcp_fetch_page",
                         "ok": True,
-                        "input": {"url": "https://docs.smith.langchain.com"},
-                        "output": {"content": "x" * 800},
+                        "valid_result_count": 1,
+                        "content_length": 800,
+                        "failure_type": "none",
+                        "error": None,
                     },
                 ]
             }
@@ -72,11 +67,13 @@ class WebToolStabilityEvaluatorTest(unittest.TestCase):
 
         result = evaluate_web_tool_stability_from_outputs(
             {
-                "tool_outputs": [
+                "web_tool_evaluation_records": [
                     {
                         "tool_name": "playwright_mcp_fetch_page",
                         "ok": False,
-                        "input": {"url": "https://example.com"},
+                        "valid_result_count": 0,
+                        "content_length": 0,
+                        "failure_type": "403",
                         "error": "HTTP 403 Access Denied",
                     }
                 ]
@@ -93,11 +90,11 @@ class WebToolStabilityEvaluatorTest(unittest.TestCase):
         feedback = web_tool_stability_evaluator(
             inputs={"question": "测试 Web 工具稳定性"},
             reference_outputs={},
-            outputs={"tool_outputs": []},
+            outputs={"web_tool_evaluation_records": []},
         )
 
         self.assertEqual(feedback["key"], "web_tool_stability")
-        self.assertIn("score", feedback)
+        self.assertEqual(feedback["value"], "not_applicable")
         self.assertIn("comment", feedback)
         self.assertEqual(json.loads(feedback["comment"])["question"], "测试 Web 工具稳定性")
 

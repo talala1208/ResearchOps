@@ -1,4 +1,6 @@
 from langsmith import Client
+from dotenv import load_dotenv
+load_dotenv()
 
 client = Client()
 
@@ -24,7 +26,7 @@ def upload_examples() -> None:
 
 
 # 从 langsmith 粘贴
-dataset_id = "真实的-dataset-id"
+dataset_id = "95c8685d-805e-405b-9e89-01ce30d2f601"
 
 examples = [
     {

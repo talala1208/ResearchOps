@@ -246,6 +246,153 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     return tool_outputs
 
 
+def _tool_output_as_dict(value: Any) -> dict[str, Any]:
+    """把工具输出转换为便于确定性检查的字典。"""
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return {"raw_text": value}
+    return {}
+
+
+def _tool_output_text(value: Any) -> str:
+    """提取工具输出中的可检查文本。"""
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _valid_search_result_count(tool_output: dict[str, Any]) -> int:
+    """确定性统计搜索工具的有效结果数量。"""
+
+    tool_name = str(tool_output["tool_name"])
+    output = _tool_output_as_dict(tool_output.get("output"))
+    if tool_name == "serp_api_search":
+        results = output.get("results") or output.get("organic_results") or []
+        return sum(
+            1
+            for item in results
+            if isinstance(item, dict)
+            and item.get("title")
+            and (item.get("url") or item.get("link"))
+            and item.get("snippet")
+        )
+    if tool_name == "tavily_mcp_search":
+        results = output.get("results") or []
+        if not results and len(str(output.get("raw_text") or "").strip()) >= 100:
+            return 1
+        return sum(
+            1
+            for item in results
+            if isinstance(item, dict)
+            and item.get("url")
+            and (item.get("content") or item.get("snippet") or item.get("title"))
+        )
+    if tool_name == "context7_mcp_query":
+        output_text = _tool_output_text(tool_output.get("output")).strip()
+        invalid_markers = (
+            "no docs",
+            "not found",
+            "找不到",
+            "没有找到",
+            "error",
+            "缺少",
+            "无法使用",
+        )
+        if output_text and not any(
+            marker in output_text.lower() for marker in invalid_markers
+        ):
+            return 1
+    return 0
+
+
+def _playwright_content_length(output: Any) -> int:
+    """估算 Playwright 返回的最大正文长度。"""
+
+    output_dict = _tool_output_as_dict(output)
+    candidates = [
+        output_dict.get("content"),
+        output_dict.get("text"),
+        output_dict.get("markdown"),
+        output_dict.get("page_text"),
+        output_dict.get("raw_text"),
+        output_dict.get("snapshot"),
+    ]
+    return max((len(_tool_output_text(item).strip()) for item in candidates), default=0)
+
+
+def _playwright_failure_type(tool_output: dict[str, Any], content_length: int) -> str:
+    """确定性识别 Playwright 的主要失败类型。"""
+
+    output = _tool_output_as_dict(tool_output.get("output"))
+    text = " ".join(
+        [
+            _tool_output_text(tool_output.get("error")),
+            _tool_output_text(tool_output.get("output")),
+            _tool_output_text(tool_output.get("input")),
+        ]
+    )
+    lowered = text.lower()
+    url = _tool_output_as_dict(tool_output.get("input")).get("url") or output.get("url")
+    if "timeout" in lowered or "timed out" in lowered or "超时" in lowered:
+        return "timeout"
+    if "403" in lowered or "access denied" in lowered or "forbidden" in lowered:
+        return "403"
+    if url == "about:blank" or "about:blank" in lowered:
+        return "about_blank"
+    if "captcha" in lowered or "just a moment" in lowered or "cloudflare" in lowered:
+        return "anti_bot"
+    if "application/pdf" in lowered or str(url).lower().endswith(".pdf"):
+        return "pdf"
+    if "enable javascript" in lowered or "requires javascript" in lowered or "动态渲染" in lowered:
+        return "dynamic_rendering"
+    if content_length < 500:
+        return "empty_content"
+    return "none" if tool_output.get("ok") else "unknown"
+
+
+def _build_web_tool_evaluation_records(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从原始工具输出提取可写入 State 的紧凑评测记录。"""
+
+    records = []
+    for tool_output in tool_outputs:
+        tool_name = str(tool_output["tool_name"])
+        is_playwright = tool_name.startswith("playwright_mcp_fetch")
+        content_length = (
+            _playwright_content_length(tool_output.get("output"))
+            if is_playwright
+            else 0
+        )
+        failure_type = (
+            _playwright_failure_type(tool_output, content_length)
+            if is_playwright
+            else None
+        )
+        valid_result_count = (
+            1
+            if is_playwright and tool_output.get("ok") and failure_type == "none"
+            else _valid_search_result_count(tool_output)
+        )
+        error = tool_output.get("error")
+        records.append(
+            {
+                "tool_name": tool_name,
+                "ok": bool(tool_output.get("ok")),
+                "valid_result_count": valid_result_count,
+                "content_length": content_length,
+                "failure_type": failure_type,
+                "error": str(error)[:500] if error else None,
+            }
+        )
+    return records
+
+
 def _fallback_result_from_tool_outputs(
     task: dict[str, Any],
     tool_outputs: list[dict[str, Any]],
@@ -382,6 +529,7 @@ def web_search_subagent_tool(task_json: str) -> str:
         result = _fallback_result_from_tool_outputs(task, tool_outputs)
         result["hitl_reason"] = f"Web 工具汇总失败：{exc}；{result['hitl_reason']}"
     result = _normalize_web_hitl_decision(result)
+    result["tool_evaluation_records"] = _build_web_tool_evaluation_records(tool_outputs)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -402,5 +550,7 @@ def run_web_search_subagent_for_task(task: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Web Search SubAgent 返回值缺少 results 列表")
     if "web_hitl_required" not in parsed:
         raise ValueError("Web Search SubAgent 返回值缺少 web_hitl_required")
+    if not isinstance(parsed.get("tool_evaluation_records"), list):
+        raise ValueError("Web Search SubAgent 返回值缺少 tool_evaluation_records 列表")
 
     return parsed

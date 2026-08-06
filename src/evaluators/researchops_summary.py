@@ -163,9 +163,16 @@ def evaluate_researchops_summary(outputs: list[dict[str, Any]]) -> ResearchOpsSu
 
     final_report_rate = mean(1.0 if _has_final_report(output) else 0.0 for output in normalized_outputs)
     persist_success_rate = mean(1.0 if _persist_success(output) else 0.0 for output in normalized_outputs)
-    evidence_sufficient_rate = mean(
-        1.0 if _bool_value(output.get("evidence_sufficient")) else 0.0
-        for output in normalized_outputs
+    evidence_outputs = [
+        output for output in normalized_outputs if "evidence_sufficient" in output
+    ]
+    evidence_sufficient_rate = (
+        mean(
+            1.0 if _bool_value(output["evidence_sufficient"]) else 0.0
+            for output in evidence_outputs
+        )
+        if evidence_outputs
+        else 0.0
     )
     evidence_scores = [
         score
@@ -176,13 +183,34 @@ def evaluate_researchops_summary(outputs: list[dict[str, Any]]) -> ResearchOpsSu
         if score is not None
     ]
     average_evidence_sufficiency_score = mean(evidence_scores) if evidence_scores else 0.0
-    review_pass_rate = mean(1.0 if _review_passed(output) else 0.0 for output in normalized_outputs)
+    review_outputs = [
+        output for output in normalized_outputs if "review_result" in output
+    ]
+    review_pass_rate = (
+        mean(1.0 if _review_passed(output) else 0.0 for output in review_outputs)
+        if review_outputs
+        else 0.0
+    )
     review_scores = [score for score in (_review_score(output) for output in normalized_outputs) if score is not None]
     average_review_score = mean(review_scores) if review_scores else 0.0
-    safety_pass_rate = mean(1.0 if _safety_passed(output) else 0.0 for output in normalized_outputs)
-    non_degraded_rate = mean(
-        0.0 if _bool_value(output.get("degraded")) else 1.0
-        for output in normalized_outputs
+    safety_outputs = [
+        output for output in normalized_outputs if "safety_review_result" in output
+    ]
+    safety_pass_rate = (
+        mean(1.0 if _safety_passed(output) else 0.0 for output in safety_outputs)
+        if safety_outputs
+        else 0.0
+    )
+    degradation_outputs = [
+        output for output in normalized_outputs if "degraded" in output
+    ]
+    non_degraded_rate = (
+        mean(
+            0.0 if _bool_value(output["degraded"]) else 1.0
+            for output in degradation_outputs
+        )
+        if degradation_outputs
+        else 0.0
     )
     unresolved_hitl_rate = mean(
         1.0 if _has_unresolved_hitl(output) else 0.0

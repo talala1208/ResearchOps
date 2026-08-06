@@ -200,6 +200,8 @@ class ToolReturnsTest(unittest.TestCase):
         payload = json.loads(result)
         self.assertFalse(payload["web_hitl_required"])
         self.assertEqual(payload["results"][0]["title"], "Cursor Docs")
+        self.assertEqual(payload["tool_evaluation_records"], [])
+        self.assertNotIn("tool_outputs", payload)
 
 
 if __name__ == "__main__":

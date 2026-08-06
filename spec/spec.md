@@ -425,10 +425,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `executed_mermaid_png_path`
 - `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；`executed_mermaid` 只保留在 State，不保存 `.mmd` 文件。
 - 当前 evaluator：
-  - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 指标。
+  - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
   - `research_report_pairwise_preference`：LLM-as-Judge Pairwise A/B，从回答问题、证据支撑、覆盖、限制披露、引用、结构和安全七个维度比较报告。
-  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；当前要求 run 输出可读取 `tool_outputs`，主 Graph State 尚未持久化该字段，直接评估主 Graph 时能力未完整接线。
-  - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果。
+  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，只保留工具名、成功状态、有效结果数、正文长度、失败类型和截断错误，不把搜索结果或页面正文写入主 Graph State，也不增加 summarize LLM 的职责；evaluator 只按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`。
+  - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果；没有触发外部 worker 的 run 标记为 `not_applicable`。
 - 当前 LangSmith dataset 定义：`researchops-input-guard-v1`、`researchops-standard-research-v1`、`researchops-url-web-search-v1`、`researchops-local-and-structured-v1`、`researchops-edge-cases-v1`。
 - `src/dataset` 提供 dataset 创建、样例追加、split 管理和 Pairwise A/B 运行脚本；均为手动入口，不进入主 Graph。
 - LangSmith Trace metadata 后续应记录：

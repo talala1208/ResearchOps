@@ -105,6 +105,7 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
 
     tasks = _tasks_by_source_type(state, WEB_SOURCE_TYPES)
     results = []
+    web_tool_evaluation_records = []
     web_hitl_required = False
     web_hitl_reason = None
     sub_questions = state.get("sub_questions", {})
@@ -119,6 +120,9 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
             task_for_subagent["expected_evidence"] = expected_evidence[question_id]
 
         subagent_result = run_web_search_subagent_for_task(task_for_subagent)
+        web_tool_evaluation_records.extend(
+            subagent_result["tool_evaluation_records"]
+        )
         web_hitl_required = web_hitl_required or bool(
             subagent_result["web_hitl_required"]
         )
@@ -151,6 +155,7 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     return {
         **record_node(state, "web_search_sub_agent"),
         "web_search_results": results,
+        "web_tool_evaluation_records": web_tool_evaluation_records,
         "web_hitl_required": web_hitl_required,
         "web_hitl_reason": web_hitl_reason,
     }

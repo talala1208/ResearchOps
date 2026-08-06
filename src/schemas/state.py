@@ -70,6 +70,17 @@ class SearchTask(TypedDict):
     attempt: int
 
 
+class WebToolEvaluationRecord(TypedDict):
+    """Web 工具调用的紧凑确定性评测记录。"""
+
+    tool_name: str
+    ok: bool
+    valid_result_count: int
+    content_length: int
+    failure_type: str | None
+    error: str | None
+
+
 class EvidenceItem(TypedDict):
     """标准化证据项。"""
 
@@ -238,8 +249,9 @@ class ResearchState(TypedDict, total=False):
     search_attempt: int
     search_iteration_context: dict
 
-    # 工具原始输出
+    # 工具输出与紧凑观测记录
     web_search_results: list[dict]
+    web_tool_evaluation_records: list[WebToolEvaluationRecord]
     web_hitl_required: bool
     web_hitl_reason: str | None
     web_hitl_decisions: list[dict]
