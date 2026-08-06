@@ -48,6 +48,29 @@ def _read_optional_env(name: str) -> str | None:
     return value.strip()
 
 
+def _env_enabled(name: str, default: bool = False) -> bool:
+    """读取布尔环境变量。"""
+
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _devtools_args() -> list[str]:
+    """构建 HITL DevTools MCP 启动参数。"""
+
+    args = [
+        "chrome-devtools-mcp@latest",
+        "--isolated",
+        "--no-usage-statistics",
+        "--no-performance-crux",
+    ]
+    if _env_enabled("HITL_DEVTOOLS_HEADLESS", default=False):
+        args.append("--headless")
+    return args
+
+
 def _build_mcp_config() -> dict[str, dict[str, Any]]:
     """构建 Online MCP 配置。"""
 
@@ -60,15 +83,17 @@ def _build_mcp_config() -> dict[str, dict[str, Any]]:
             "args": [
                 "-y",
                 "@playwright/mcp",
+                "--headless",
+                "--isolated",
+                "--browser",
+                "chrome",
             ],
             "env": {},
         },
         "devtools": {
             "transport": "stdio",
             "command": "npx",
-            "args": [
-                "chrome-devtools-mcp@latest",
-            ],
+            "args": _devtools_args(),
             "env": {},
         },
     }

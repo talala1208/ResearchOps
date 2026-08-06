@@ -6,6 +6,12 @@ import operator
 from typing import Annotated, Literal, TypedDict
 
 
+def merge_dict(left: dict, right: dict) -> dict:
+    """合并并行节点写入的字典状态。"""
+
+    return {**left, **right}
+
+
 SourceType = Literal[
     "official_docs",
     "pricing_page",
@@ -240,7 +246,7 @@ class ResearchState(TypedDict, total=False):
     sanitized_results: list[dict]
 
     # 证据治理
-    evidence_items: dict[str, EvidenceItem]  # key: evidence_id
+    evidence_items: Annotated[dict[str, EvidenceItem], merge_dict]  # key: evidence_id
     evidence_clusters: list[dict]
     evidence_matrix: dict
     evidence_sufficiency_result: EvidenceSufficiencyResult
@@ -249,7 +255,7 @@ class ResearchState(TypedDict, total=False):
     evidence_sufficiency_threshold: float
     evidence_sufficient: bool
     insufficient_question_ids: list[str]
-    conflicts: dict[str, ConflictItem]  # key: conflict_id
+    conflicts: Annotated[dict[str, ConflictItem], merge_dict]  # key: conflict_id
 
     # HITL
     hitl_required: bool

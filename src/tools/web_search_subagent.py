@@ -2,8 +2,9 @@
 
 当前实现采用“确定性调度 + 单次 LLM 汇总”：
 - 不再使用内部 `create_agent` ReAct 循环，避免工具自由循环和重复 trace。
-- 默认只调度 SerpAPI / Tavily / Context7 工具。
-- Claude Code / Codex worker 仅在策略迭代或显式允许时最多调用一个。
+- 只调度 SerpAPI / Tavily / Context7 / headless Playwright 页面读取工具。
+- 不包含 DevTools；DevTools 只属于 Web HITL 节点。
+- 不包含 Claude Code / Codex；外部 Agent worker 只属于 strategy_iteration。
 """
 
 from __future__ import annotations
@@ -20,10 +21,8 @@ from serpapi import GoogleSearch
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import WebSearchSubAgentResultOutput
-from src.tools.external_agent_workers import call_claude_code_worker, call_codex_worker
 from src.tools.online_mcp_tools import (
     context7_mcp_query,
-    devtools_mcp_inspect_page,
     playwright_mcp_fetch_page,
     tavily_mcp_search,
 )
@@ -42,6 +41,7 @@ WEB_SOURCE_TYPES = {
     "traffic_data",
 }
 URL_PATTERN = re.compile(r"https?://[^\s]+")
+DEFAULT_SERPAPI_PAGE_FETCH_TOP_N = 1
 
 
 def _extract_url(value: str) -> str | None:
@@ -157,44 +157,55 @@ def _call_tool(name: str, tool_obj: Any, payload: dict[str, Any]) -> dict[str, A
         }
 
 
-def _should_allow_external_worker(task: dict[str, Any], allow_external_workers: bool) -> bool:
-    """判断本次 Web 检索是否允许调用外部 Agent worker。"""
+def _serpapi_result_urls(tool_output: dict[str, Any]) -> list[str]:
+    """从 SerpAPI 结构化结果中提取可继续读取正文的 URL。"""
 
-    if allow_external_workers:
-        return True
-    return bool(task.get("allow_external_worker"))
+    if tool_output["tool_name"] != "serp_api_search" or not tool_output.get("ok"):
+        return []
+    output = tool_output.get("output")
+    if not isinstance(output, dict):
+        return []
+    results = output.get("results")
+    if not isinstance(results, list):
+        return []
+
+    urls = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            urls.append(url)
+    return urls
 
 
-def _call_optional_external_worker(task: dict[str, Any]) -> dict[str, Any]:
-    """按配置最多调用一个外部 worker。"""
+def _serpapi_page_fetch_top_n() -> int:
+    """读取 SerpAPI 结果正文抓取数量。"""
 
-    prompt = (
-        "请协助处理一个复杂 Web 研究检索任务，只返回可公开引用的网页候选资料摘要。\n"
-        f"task_id: {task['task_id']}\n"
-        f"question_id: {task['question_id']}\n"
-        f"query: {task['query']}\n"
-        f"source_type: {task['source_type']}"
+    raw_value = os.getenv(
+        "WEB_SEARCH_FETCH_SERPAPI_TOP_N",
+        str(DEFAULT_SERPAPI_PAGE_FETCH_TOP_N),
     )
-    provider = os.getenv("WEB_SEARCH_EXTERNAL_WORKER", "claude_code").strip()
-    if provider == "codex":
-        return _call_tool(
-            "call_codex_worker",
-            call_codex_worker,
-            {"prompt": prompt},
-        )
-    return _call_tool(
-        "call_claude_code_worker",
-        call_claude_code_worker,
-        {"prompt": prompt},
-    )
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_SERPAPI_PAGE_FETCH_TOP_N
+    return max(0, min(value, 5))
+
+
+def _browser_mcp_enabled() -> bool:
+    """判断是否启用 headless Playwright 页面读取工具。"""
+
+    return os.getenv("ENABLE_BROWSER_MCP_TOOLS", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @traceable(name="collect_web_tool_outputs", run_type="chain")
-def _collect_web_tool_outputs(
-    task: dict[str, Any],
-    *,
-    allow_external_workers: bool,
-) -> list[dict[str, Any]]:
+def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     """按固定顺序收集 Web 工具输出，不让 LLM 自行循环调用工具。"""
 
     query = task["query"]
@@ -211,16 +222,15 @@ def _collect_web_tool_outputs(
             _call_tool("context7_mcp_query", context7_mcp_query, {"topic": query})
         )
 
-    tool_outputs.append(
-        _call_tool(
-            "serp_api_search",
-            serp_api_search,
-            {"query": query},
-        )
+    serpapi_output = _call_tool(
+        "serp_api_search",
+        serp_api_search,
+        {"query": query},
     )
+    tool_outputs.append(serpapi_output)
 
     url = _extract_url(query)
-    if url is not None:
+    if url is not None and _browser_mcp_enabled():
         tool_outputs.append(
             _call_tool(
                 "playwright_mcp_fetch_page",
@@ -228,16 +238,18 @@ def _collect_web_tool_outputs(
                 {"url": url},
             )
         )
-        tool_outputs.append(
-            _call_tool(
-                "devtools_mcp_inspect_page",
-                devtools_mcp_inspect_page,
-                {"url": url},
+    elif source_type in WEB_SOURCE_TYPES and _browser_mcp_enabled():
+        for index, result_url in enumerate(
+            _serpapi_result_urls(serpapi_output)[: _serpapi_page_fetch_top_n()],
+            start=1,
+        ):
+            tool_outputs.append(
+                _call_tool(
+                    f"playwright_mcp_fetch_serpapi_result_page_{index}",
+                    playwright_mcp_fetch_page,
+                    {"url": result_url},
+                )
             )
-        )
-
-    if _should_allow_external_worker(task, allow_external_workers):
-        tool_outputs.append(_call_optional_external_worker(task))
 
     return tool_outputs
 
@@ -278,6 +290,52 @@ def _fallback_result_from_tool_outputs(
     }
 
 
+def _has_usable_web_result(result: dict[str, Any]) -> bool:
+    """判断汇总结果中是否已有可用的候选网页证据。"""
+
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        url_or_path = item.get("url_or_path")
+        snippet = item.get("snippet")
+        requires_login = item.get("requires_login")
+        if (
+            isinstance(url_or_path, str)
+            and url_or_path.startswith(("http://", "https://"))
+            and isinstance(snippet, str)
+            and snippet.strip()
+            and not requires_login
+        ):
+            return True
+    return False
+
+
+def _normalize_web_hitl_decision(result: dict[str, Any]) -> dict[str, Any]:
+    """避免把普通页面抓取失败误升级为 HITL。
+
+    SerpAPI / Tavily 的标题、URL、摘要可以先作为候选证据进入后续证据评分；
+    页面正文 403、about:blank 或超时只应降低证据可信度，不应默认要求人工接管。
+    真正的登录墙、验证码和权限确认仍保留 HITL。
+    """
+
+    if not result.get("web_hitl_required") or not _has_usable_web_result(result):
+        return result
+
+    reason = str(result.get("hitl_reason") or "")
+    hard_hitl_keywords = ("登录", "验证码", "captcha", "login", "sign in")
+    if any(keyword in reason.lower() for keyword in hard_hitl_keywords):
+        return result
+
+    return {
+        **result,
+        "web_hitl_required": False,
+        "hitl_reason": (
+            reason
+            + "；已降级为候选证据处理：页面正文抓取失败不再单独触发 HITL。"
+        ).lstrip("；"),
+    }
+
+
 @traceable(name="summarize_web_tool_outputs", run_type="llm")
 def _summarize_web_tool_outputs(
     task: dict[str, Any],
@@ -314,34 +372,24 @@ def web_search_subagent_tool(task_json: str) -> str:
 
     payload = json.loads(task_json)
     task = payload["task"] if "task" in payload else payload
-    allow_external_workers = bool(payload.get("allow_external_workers", False))
-    tool_outputs = _collect_web_tool_outputs(
-        task,
-        allow_external_workers=allow_external_workers,
-    )
+    tool_outputs = _collect_web_tool_outputs(task)
     try:
         result = _summarize_web_tool_outputs(task, tool_outputs)
     except Exception as exc:  # noqa: BLE001 - 汇总失败时不能重启工具循环
         result = _fallback_result_from_tool_outputs(task, tool_outputs)
         result["hitl_reason"] = f"Web 工具汇总失败：{exc}；{result['hitl_reason']}"
+    result = _normalize_web_hitl_decision(result)
     return json.dumps(result, ensure_ascii=False)
 
 
 @traceable(name="run_web_search_subagent_for_task", run_type="chain")
-def run_web_search_subagent_for_task(
-    task: dict[str, Any],
-    *,
-    allow_external_workers: bool = False,
-) -> dict[str, Any]:
+def run_web_search_subagent_for_task(task: dict[str, Any]) -> dict[str, Any]:
     """运行确定性 Web Search SubAgent 工具，并解析为 Python dict。"""
 
     raw_result = web_search_subagent_tool.invoke(
         {
             "task_json": json.dumps(
-                {
-                    "task": task,
-                    "allow_external_workers": allow_external_workers,
-                },
+                {"task": task},
                 ensure_ascii=False,
             )
         }

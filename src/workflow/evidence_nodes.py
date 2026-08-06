@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 from collections import defaultdict
 from typing import Any
 
 from src.config.settings import get_workflow_config
 from src.schemas.state import ResearchState
+from src.tools.external_agent_workers import call_claude_code_worker, call_codex_worker
 from src.workflow.node_utils import record_node
 
 
@@ -29,6 +32,28 @@ SOURCE_AUTHORITY_SCORE = {
     "traffic_data": 0.55,
     "community": 0.45,
 }
+
+
+def _strategy_external_worker_enabled() -> bool:
+    """判断策略迭代是否启用外部 Agent worker。"""
+
+    return os.getenv("ENABLE_STRATEGY_EXTERNAL_WORKER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _call_strategy_external_worker(prompt: str) -> dict[str, Any]:
+    """调用策略迭代外部 worker。"""
+
+    provider = os.getenv("STRATEGY_EXTERNAL_WORKER", "codex").strip()
+    if provider == "claude_code":
+        raw_result = call_claude_code_worker.invoke({"prompt": prompt})
+    else:
+        raw_result = call_codex_worker.invoke({"prompt": prompt})
+    return json.loads(raw_result)
 
 
 def _stable_unique_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -363,13 +388,10 @@ def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
     evidence_sufficiency_score = (
         round(weighted_score_sum / total_weight, 4) if total_weight else 0.0
     )
-    evidence_sufficient = (
-        high_priority_all_met
-        and evidence_sufficiency_score >= EVIDENCE_SUFFICIENCY_THRESHOLD
-    )
+    evidence_sufficient = evidence_sufficiency_score >= EVIDENCE_SUFFICIENCY_THRESHOLD
     degradation_reason = None
     if not evidence_sufficient:
-        degradation_reason = "证据不足：存在 high 优先级子问题未满足，或整体加权证据分低于阈值"
+        degradation_reason = "证据不足：整体加权证据分低于阈值"
 
     return {
         **record_node(state, "check_evidence_sufficiency"),
@@ -461,6 +483,18 @@ def strategy_iteration(state: ResearchState) -> dict[str, Any]:
             "如果缺少高质量来源，优先尝试 official_docs、pricing_page、github 或 structured_mock",
         ],
     }
+    if _strategy_external_worker_enabled():
+        worker_prompt = (
+            "你是 ResearchOps 的策略迭代 worker。请只基于下面 JSON，给出下一轮检索策略建议；"
+            "不要写最终报告，不要修改文件。\n"
+            + json.dumps(search_iteration_context, ensure_ascii=False, indent=2)
+        )
+        external_worker_result = _call_strategy_external_worker(worker_prompt)
+        search_iteration_context["external_worker_result"] = external_worker_result
+        if external_worker_result.get("ok") and external_worker_result.get("text"):
+            search_iteration_context["strategy_suggestions"].append(
+                "外部 worker 建议：" + str(external_worker_result["text"])[:1000]
+            )
 
     return {
         **record_node(state, "strategy_iteration"),

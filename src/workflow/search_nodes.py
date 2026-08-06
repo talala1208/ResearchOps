@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from src.schemas.state import ResearchState
 from src.tools.local_document_search import query_local_documents_for_task
 from src.tools.structured_data import query_structured_products_for_task
+from src.tools.online_mcp_tools import devtools_mcp_inspect_page
 from src.tools.web_search_subagent import run_web_search_subagent_for_task
 from src.workflow.node_utils import record_node
 
@@ -27,6 +30,31 @@ WEB_SOURCE_TYPES = {
 }
 LOCAL_SOURCE_TYPES = {"local_document"}
 STRUCTURED_SOURCE_TYPES = {"structured_mock"}
+
+
+def _hitl_devtools_enabled() -> bool:
+    """判断 Web HITL 是否启用 DevTools 登录界面确认。"""
+
+    return os.getenv("ENABLE_HITL_DEVTOOLS", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _inspect_login_page_with_devtools(url: str) -> dict[str, Any]:
+    """用 DevTools MCP 打开并观察登录 / 权限页面。"""
+
+    if not _hitl_devtools_enabled():
+        return {
+            "ok": False,
+            "provider": "devtools_mcp",
+            "skipped": True,
+            "reason": "ENABLE_HITL_DEVTOOLS=false，跳过 DevTools 登录界面确认。",
+        }
+    raw_result = devtools_mcp_inspect_page.invoke({"url": url})
+    return json.loads(raw_result)
 
 
 def _tasks_by_source_type(state: ResearchState, source_types: set[str]) -> list[dict[str, Any]]:
@@ -83,13 +111,8 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     web_hitl_required = False
     web_hitl_reason = None
 
-    allow_external_workers = state.get("planning_mode") == "iteration"
-
     for task in tasks:
-        subagent_result = run_web_search_subagent_for_task(
-            task,
-            allow_external_workers=allow_external_workers,
-        )
+        subagent_result = run_web_search_subagent_for_task(task)
         web_hitl_required = web_hitl_required or bool(
             subagent_result["web_hitl_required"]
         )
@@ -123,31 +146,37 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
 
 
 def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
-    """Web Search 登录 / 反爬 HITL 替代实现。
+    """Web Search 登录 / 反爬 HITL 处理。
 
-    当前不真正暂停等待用户，只记录 Web HITL 被处理为“未触发或已跳过”。
-    后续接入真实 HITL 时再改为中断 / 恢复逻辑。
+    DevTools 只在 HITL 场景使用，用于打开、确认和展示登录 / 权限页面。
+    当前节点不默认通过 HITL；它只记录待人工接管的页面观察结果。
     """
 
     web_results = state.get("web_search_results", [])
-    decisions = [
-        {
-            "hitl_type": "web_search_handoff",
-            "result_id": result["result_id"],
-            "task_id": result["task_id"],
-            "question_id": result["question_id"],
-            "completed": False,
-            "decision": "placeholder_no_handoff_required",
-            "reason": result.get("blocked_reason"),
-        }
-        for result in web_results
-        if result.get("requires_login")
-    ]
+    decisions = []
+    for result in web_results:
+        if not result.get("requires_login"):
+            continue
+        url = result["url_or_path"]
+        devtools_observation = _inspect_login_page_with_devtools(url)
+        decisions.append(
+            {
+                "hitl_type": "web_search_login_handoff",
+                "result_id": result["result_id"],
+                "task_id": result["task_id"],
+                "question_id": result["question_id"],
+                "url": url,
+                "completed": False,
+                "decision": "requires_user_login_or_confirmation",
+                "reason": result.get("blocked_reason") or state.get("web_hitl_reason"),
+                "devtools_observation": devtools_observation,
+            }
+        )
 
     return {
         **record_node(state, "web_search_hitl_request"),
         "web_hitl_decisions": decisions,
-        "web_hitl_required": False,
+        "web_hitl_required": bool(decisions),
     }
 
 

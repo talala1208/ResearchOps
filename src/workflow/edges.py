@@ -41,46 +41,17 @@ def route_after_input_guard(state: ResearchState) -> str:
 def route_after_plan_research(state: ResearchState) -> list[str]:
     """检索任务分发后的条件路由。
 
-    后续根据 `search_tasks` 中的 `source_type` 精确决定触发哪些工具。
-    当前如果还没有真实 search task，就默认三类检索都进入占位分支，
-    用于保留完整编排结构。
+    当前图里三类检索节点需要并行汇聚到同一个清洗节点。
+    为了避免某个动态分支单独提前触发 `tool_output_sanitizer`，这里固定启动
+    三个检索节点；每个节点内部再按 `search_tasks.source_type` 过滤自己的任务。
+    没有任务的检索节点只会写入空结果。
     """
 
-    search_tasks = state.get("search_tasks", [])
-    if not search_tasks:
-        return [
-            WEB_SEARCH_SUB_AGENT,
-            LOCAL_DOCUMENT_SEARCH_TOOL,
-            QUERY_STRUCTURED_DATA,
-        ]
-
-    target_nodes = set()
-    for task in search_tasks:
-        source_type = task.get("source_type")
-        if source_type in {
-            "official_docs",
-            "pricing_page",
-            "changelog",
-            "blog",
-            "community",
-            "github",
-            "product_directory",
-            "traffic_data",
-        }:
-            target_nodes.add(WEB_SEARCH_SUB_AGENT)
-        elif source_type == "local_document":
-            target_nodes.add(LOCAL_DOCUMENT_SEARCH_TOOL)
-        elif source_type == "structured_mock":
-            target_nodes.add(QUERY_STRUCTURED_DATA)
-
-    if not target_nodes:
-        return [
-            WEB_SEARCH_SUB_AGENT,
-            LOCAL_DOCUMENT_SEARCH_TOOL,
-            QUERY_STRUCTURED_DATA,
-        ]
-
-    return sorted(target_nodes)
+    return [
+        WEB_SEARCH_SUB_AGENT,
+        LOCAL_DOCUMENT_SEARCH_TOOL,
+        QUERY_STRUCTURED_DATA,
+    ]
 
 
 def route_after_web_search(state: ResearchState) -> str:
@@ -92,6 +63,18 @@ def route_after_web_search(state: ResearchState) -> str:
     if state.get("web_hitl_required", False):
         return WEB_SEARCH_HITL_REQUEST
     return TOOL_OUTPUT_SANITIZER
+
+
+def route_after_tool_output_sanitizer(state: ResearchState) -> str:
+    """工具输出统一清洗后的 Web HITL 路由。
+
+    Web / Local / Structured 三类工具先汇聚一次，再决定是否进入 Web HITL，
+    避免并行分支重复触发后续证据节点。
+    """
+
+    if state.get("web_hitl_required", False):
+        return WEB_SEARCH_HITL_REQUEST
+    return DEDUPLICATE_AND_CLUSTER
 
 
 def route_after_evidence_quality(state: ResearchState) -> str:
@@ -183,21 +166,20 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
             QUERY_STRUCTURED_DATA: QUERY_STRUCTURED_DATA,
         },
     )
-    builder.add_conditional_edges(
-        WEB_SEARCH_SUB_AGENT,
-        route_after_web_search,
-        {
-            WEB_SEARCH_HITL_REQUEST: WEB_SEARCH_HITL_REQUEST,
-            TOOL_OUTPUT_SANITIZER: TOOL_OUTPUT_SANITIZER,
-        },
-    )
-    builder.add_edge(WEB_SEARCH_HITL_REQUEST, TOOL_OUTPUT_SANITIZER)
     builder.add_edge(
-        [LOCAL_DOCUMENT_SEARCH_TOOL, QUERY_STRUCTURED_DATA],
+        [WEB_SEARCH_SUB_AGENT, LOCAL_DOCUMENT_SEARCH_TOOL, QUERY_STRUCTURED_DATA],
         TOOL_OUTPUT_SANITIZER,
     )
 
-    builder.add_edge(TOOL_OUTPUT_SANITIZER, DEDUPLICATE_AND_CLUSTER)
+    builder.add_conditional_edges(
+        TOOL_OUTPUT_SANITIZER,
+        route_after_tool_output_sanitizer,
+        {
+            WEB_SEARCH_HITL_REQUEST: WEB_SEARCH_HITL_REQUEST,
+            DEDUPLICATE_AND_CLUSTER: DEDUPLICATE_AND_CLUSTER,
+        },
+    )
+    builder.add_edge(WEB_SEARCH_HITL_REQUEST, DEDUPLICATE_AND_CLUSTER)
     builder.add_edge(DEDUPLICATE_AND_CLUSTER, EVALUATE_EVIDENCE_QUALITY)
     builder.add_conditional_edges(
         EVALUATE_EVIDENCE_QUALITY,

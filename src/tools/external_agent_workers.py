@@ -1,6 +1,6 @@
 """外部 Agent worker 工具。
 
-用途：给 Web Search SubAgent 在复杂问题或策略迭代时调用 Claude Code / Codex。
+用途：给 Strategy Iteration 在复杂问题或需要外部策略建议时调用 Claude Code / Codex。
 
 安全边界：
 - 默认不真实调用外部 Agent。

@@ -20,10 +20,21 @@ class OnlineMCPConfigTest(unittest.TestCase):
 
         self.assertEqual(config["playwright"]["transport"], "stdio")
         self.assertEqual(config["playwright"]["command"], "npx")
-        self.assertEqual(config["playwright"]["args"], ["-y", "@playwright/mcp"])
+        self.assertEqual(
+            config["playwright"]["args"],
+            ["-y", "@playwright/mcp", "--headless", "--isolated", "--browser", "chrome"],
+        )
         self.assertEqual(config["devtools"]["transport"], "stdio")
         self.assertEqual(config["devtools"]["command"], "npx")
-        self.assertEqual(config["devtools"]["args"], ["chrome-devtools-mcp@latest"])
+        self.assertEqual(
+            config["devtools"]["args"],
+            [
+                "chrome-devtools-mcp@latest",
+                "--isolated",
+                "--no-usage-statistics",
+                "--no-performance-crux",
+            ],
+        )
         self.assertNotIn("tavily-remote-mcp", config)
         self.assertNotIn("context7", config)
 
