@@ -243,7 +243,6 @@ class ResearchState(TypedDict, total=False):
     # 检索任务
     active_question_ids: list[str]
     search_tasks: list[SearchTask]
-    previous_search_tasks: list[SearchTask]
     planning_mode: Literal["initial", "iteration"]
     search_dispatch_mode: Literal["initial", "iteration"]
     search_attempt: int
@@ -251,12 +250,14 @@ class ResearchState(TypedDict, total=False):
 
     # 工具输出与紧凑观测记录
     web_search_results: list[dict]
-    web_tool_evaluation_records: list[WebToolEvaluationRecord]
+    web_tool_evaluation_records: Annotated[
+        list[WebToolEvaluationRecord],
+        operator.add,
+    ]
     web_hitl_required: bool
     web_hitl_reason: str | None
     web_hitl_decisions: list[dict]
     local_document_results: list[dict]
-    raw_search_results: list[dict]
     sanitized_results: list[dict]
 
     # 证据治理

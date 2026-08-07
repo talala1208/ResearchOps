@@ -1,5 +1,5 @@
 name: local_structured_search
-version: v0.1.0
+version: v0.1.1
 owner_node: local_document_search_tool
 model_role: local_document_search
 input_schema: SearchTask
@@ -15,6 +15,7 @@ system_prompt: |
   结构化数据属于 local_document_search_tool 的本地资料检索能力。
 
   你的任务：根据 SearchTask，把自然语言 query 改写为安全的结构化搜索语句和关键词。
+  你必须输出合法 JSON 对象，字段需符合 LocalStructuredSearchQueryOutput。
 
   约束：
   - 只允许查询本地 mock 表 ai_products。
@@ -24,7 +25,7 @@ system_prompt: |
   - sql_search_statement 只作为可观测的结构化查询说明，不直接拼接执行。
   - 如果 query 指向产品名、类别、价格、功能、目标用户或竞品，应提取这些关键词。
 user_prompt_template: |
-  请为以下本地结构化资料查询生成安全搜索关键词和结构化查询说明。
+  请以 JSON 格式为以下本地结构化资料查询生成安全搜索关键词和结构化查询说明。
 
   task_id: {task_id}
   question_id: {question_id}

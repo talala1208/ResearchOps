@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import as_completed
 from typing import Any
+
+from langsmith.utils import ContextThreadPoolExecutor
 
 from src.schemas.state import ResearchState
 from src.tools.local_document_search import query_local_documents_for_task
@@ -27,6 +30,7 @@ WEB_SOURCE_TYPES = {
 LOCAL_SOURCE_TYPES = {"local_document", "structured_mock"}
 MARKDOWN_SOURCE_TYPES = {"local_document"}
 STRUCTURED_SOURCE_TYPES = {"structured_mock"}
+DEFAULT_WEB_SEARCH_TASK_CONCURRENCY = 3
 
 
 def _hitl_devtools_enabled() -> bool:
@@ -64,6 +68,70 @@ def _tasks_by_source_type(state: ResearchState, source_types: set[str]) -> list[
     ]
 
 
+def _web_search_task_concurrency() -> int:
+    """读取 Web Search 任务级并发上限，至少为 1。"""
+
+    raw_value = os.getenv(
+        "WEB_SEARCH_TASK_CONCURRENCY",
+        str(DEFAULT_WEB_SEARCH_TASK_CONCURRENCY),
+    )
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_WEB_SEARCH_TASK_CONCURRENCY
+    return max(1, value)
+
+
+def _prepare_web_task_for_subagent(
+    task: dict[str, Any],
+    *,
+    sub_questions: dict[str, Any],
+    expected_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """为单个 Web 任务补充 question 与 expected_evidence。"""
+
+    task_for_subagent = dict(task)
+    question_id = task["question_id"]
+    if question_id in sub_questions:
+        task_for_subagent["question"] = sub_questions[question_id]["question"]
+    if question_id in expected_evidence:
+        task_for_subagent["expected_evidence"] = expected_evidence[question_id]
+    return task_for_subagent
+
+
+def _materialize_web_search_results(
+    task: dict[str, Any],
+    subagent_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """把单个 Web SubAgent 结果转换成节点级候选结果。"""
+
+    results = []
+    for index, item in enumerate(subagent_result["results"], start=1):
+        results.append(
+            {
+                "result_id": f"R_web_{task['task_id']}_{index}",
+                "task_id": task["task_id"],
+                "question_id": task["question_id"],
+                "source_type": task["source_type"],
+                "source_name": item["source_name"],
+                "url_or_path": item["url_or_path"],
+                "title": item["title"],
+                "snippet": item["snippet"],
+                "published_at": item.get("published_at"),
+                "collected_by": "web_search_subagent",
+                "is_placeholder": True,
+                "requires_login": bool(item.get("requires_login", False)),
+                "blocked_reason": item.get("blocked_reason"),
+                "relevance_score": item.get("relevance_score"),
+                "answer_coverage_score": item.get("answer_coverage_score"),
+                "source_confidence_score": item.get("source_confidence_score"),
+                "freshness_score": item.get("freshness_score"),
+                "score_reason": item.get("score_reason"),
+            }
+        )
+    return results
+
+
 def _build_placeholder_result(
     *,
     task: dict[str, Any],
@@ -99,8 +167,8 @@ def _build_placeholder_result(
 def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     """Web Search SubAgent 节点。
 
-    该节点调用 `web_search_subagent_tool`。这个 tool 内部采用
-    确定性 Web 工具调度和单次 LLM 汇总，不做自由循环搜索。
+    该节点对多个 Web 任务做有界并发，每个任务内部仍采用
+    确定性工具调度和单次 LLM 汇总，不做自由循环搜索。
     """
 
     tasks = _tasks_by_source_type(state, WEB_SOURCE_TYPES)
@@ -111,46 +179,41 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
     sub_questions = state.get("sub_questions", {})
     expected_evidence = state.get("expected_evidence", {})
 
-    for task in tasks:
-        task_for_subagent = dict(task)
-        question_id = task["question_id"]
-        if question_id in sub_questions:
-            task_for_subagent["question"] = sub_questions[question_id]["question"]
-        if question_id in expected_evidence:
-            task_for_subagent["expected_evidence"] = expected_evidence[question_id]
-
-        subagent_result = run_web_search_subagent_for_task(task_for_subagent)
-        web_tool_evaluation_records.extend(
-            subagent_result["tool_evaluation_records"]
+    prepared_tasks = [
+        _prepare_web_task_for_subagent(
+            task,
+            sub_questions=sub_questions,
+            expected_evidence=expected_evidence,
         )
+        for task in tasks
+    ]
+    ordered_subagent_results: list[dict[str, Any] | None] = [None] * len(prepared_tasks)
+    if prepared_tasks:
+        max_workers = min(_web_search_task_concurrency(), len(prepared_tasks))
+        with ContextThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(run_web_search_subagent_for_task, task): index
+                for index, task in enumerate(prepared_tasks)
+            }
+            try:
+                for future in as_completed(future_to_index):
+                    index = future_to_index[future]
+                    ordered_subagent_results[index] = future.result()
+            except Exception:
+                for pending_future in future_to_index:
+                    pending_future.cancel()
+                raise
+
+    for task, subagent_result in zip(tasks, ordered_subagent_results, strict=True):
+        if subagent_result is None:
+            raise RuntimeError(f"Web Search 任务缺少结果：{task['task_id']}")
+        web_tool_evaluation_records.extend(subagent_result["tool_evaluation_records"])
         web_hitl_required = web_hitl_required or bool(
             subagent_result["web_hitl_required"]
         )
-        web_hitl_reason = subagent_result.get("hitl_reason") or web_hitl_reason
-
-        for index, item in enumerate(subagent_result["results"], start=1):
-            results.append(
-                {
-                    "result_id": f"R_web_{task['task_id']}_{index}",
-                    "task_id": task["task_id"],
-                    "question_id": task["question_id"],
-                    "source_type": task["source_type"],
-                    "source_name": item["source_name"],
-                    "url_or_path": item["url_or_path"],
-                    "title": item["title"],
-                    "snippet": item["snippet"],
-                    "published_at": item.get("published_at"),
-                    "collected_by": "web_search_subagent",
-                    "is_placeholder": True,
-                    "requires_login": bool(item.get("requires_login", False)),
-                    "blocked_reason": item.get("blocked_reason"),
-                    "relevance_score": item.get("relevance_score"),
-                    "answer_coverage_score": item.get("answer_coverage_score"),
-                    "source_confidence_score": item.get("source_confidence_score"),
-                    "freshness_score": item.get("freshness_score"),
-                    "score_reason": item.get("score_reason"),
-                }
-            )
+        if web_hitl_reason is None and subagent_result.get("hitl_reason"):
+            web_hitl_reason = subagent_result["hitl_reason"]
+        results.extend(_materialize_web_search_results(task, subagent_result))
 
     return {
         **record_node(state, "web_search_sub_agent"),
@@ -299,6 +362,7 @@ def tool_output_sanitizer(state: ResearchState) -> dict[str, Any]:
 
     return {
         **record_node(state, "tool_output_sanitizer"),
-        "raw_search_results": raw_results,
         "sanitized_results": sanitized_results,
+        "web_search_results": [],
+        "local_document_results": [],
     }

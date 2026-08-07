@@ -110,14 +110,14 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | 节点 | 主要读取字段 | 主要写入字段 | 路由 / 边界 |
 | --- | --- | --- | --- |
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
-| `plan_research` | `user_query`、工作流配置、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：研究计划、最低证据标准、索引、预算、首轮任务；迭代模式：`previous_search_tasks`、下一轮 `search_tasks`、任务索引、`active_question_ids`、`search_attempt`、分发模式 | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始或迭代 Prompt；每次执行统一递增 `search_steps`；Graph 随后固定并行调用 Web 与本地检索节点 |
-| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_hitl_required`、`web_hitl_reason` | 确定性调度在线工具并进行单次 LLM 汇总，不做内部 Agent 循环；SerpAPI 通过 Python SDK 调用，Tavily/Context7 通过 MCP 调用；Playwright 页面正文抓取与 Web HITL 规则见本节后文 |
+| `plan_research` | `user_query`、工作流配置、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：研究计划、最低证据标准、索引、预算、首轮任务；迭代模式：下一轮 `search_tasks`、任务索引、`active_question_ids`、`search_attempt`、分发模式 | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始或迭代 Prompt；每次执行统一递增 `search_steps`；Graph 随后固定并行调用 Web 与本地检索节点 |
+| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_tool_evaluation_records`、`web_hitl_required`、`web_hitl_reason` | 对多个 Web `search_tasks` 做有界任务级并发，单任务内仍按固定顺序调度工具；首次 LLM 汇总打分后对 SerpAPI 按综合分 keep top N，再按问题整体分与 SerpAPI top1 门槛决定是否抓取正文，并由代码把正文写入对应候选；不做内部 Agent 循环；结果、评测记录和首个 HITL 原因按原任务顺序确定性合并；SerpAPI 通过 Python SDK 调用，Tavily/Context7 通过 MCP 调用；Playwright 页面正文抓取与 Web HITL 规则见本节后文 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH`、结构化 mock 数据配置 | `local_document_results` | `local_document` 使用只读 Markdown 关键词搜索；`structured_mock` 使用 LLM 规划安全关键词后执行参数化 SQLite 查询；两类任务均在节点内部按 `source_type` 过滤 |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 仅对 `requires_login=true` 的结果调用 DevTools 观察登录、验证码或权限页面；当前记录 `completed=false`，不真正暂停 |
 | `web_search_result_ready` | 无业务字段 | `executed_nodes` | Web 分支汇聚节点；无 HITL 时直接进入，有 HITL 时在观察完成后进入，再与本地检索分支汇聚 |
-| `tool_output_sanitizer` | `web_search_results`、`local_document_results` | `raw_search_results`、`sanitized_results` | 已实现确定性边界标记；外部内容统一标记为 `untrusted_tool_output`，不得作为系统指令 |
-| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
-| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions` | 当前为确定性规则评分；发现高冲突时触发冲突 HITL |
+| `tool_output_sanitizer` | `web_search_results`、`local_document_results` | `sanitized_results`，并清空两类上游结果 | 已实现确定性边界标记；外部内容统一标记为 `untrusted_tool_output`，不得作为系统指令；不额外保存未清洗副本 |
+| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters`，并清空 `sanitized_results` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
+| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions`，并清空 `evidence_clusters` | 当前为确定性规则评分；发现高冲突时触发冲突 HITL |
 | `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 当前为替代实现，不真正暂停；人工确认结果只作为状态事实，不直接改写证据正文 |
 | `build_evidence_matrix` | `evidence_items`、`sub_questions`、`entity_index` | `evidence_matrix`、`entity_index.used_evidence_ids` | 必须通过 `question_id` 和 `evidence_id` 关联 |
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
@@ -133,10 +133,14 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 ### 检索工具契约
 
 - Web Search 使用确定性调度和单次 LLM 汇总：
-  - 所有 Web 任务调用 SerpAPI；SerpAPI 通过 `google-search-results` Python 包直连 API，默认请求 5 条中文结果。
-  - Web 类型任务调用 Tavily MCP，默认 `max_results=5`。
-  - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP，依次执行 library resolve 和 docs query。
-  - query 含 URL 时调用 Playwright 抓取该 URL；此外按 `WEB_SEARCH_FETCH_SERPAPI_TOP_N` 抓取 SerpAPI 前 N 条页面，取值限制为 0–5，0 只关闭结果页抓取。
+  - `web_search_sub_agent` 对多个 Web `search_tasks` 使用有界线程池并发；默认并发度为 `WEB_SEARCH_TASK_CONCURRENCY=3`，最小为 1；合并结果时保持原任务顺序，任一任务抛错时节点整体失败。
+  - 单任务内部仍串行调用工具，顺序不变；工具级限流为 Playwright=1、Tavily=1、Context7=2、SerpAPI=3，避免高成本 MCP / Chrome 会话风暴。
+  - 所有 Web 任务调用 SerpAPI；SerpAPI 通过 `google-search-results` Python 包直连 API；请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）；全部返回结果进入首次汇总 LLM 打分，打分后再按综合分保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
+  - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）；Tavily 已面向答案相关性排序，不再另设 keep top N。
+  - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP，依次执行 library resolve 和 docs query；进入汇总 LLM 前按 `WEB_SEARCH_CONTEXT7_MAX_CHARS` 截断文档正文（默认 4000）。
+  - query 含 URL 时，首次汇总前调用 Playwright 抓取该 URL。
+  - SerpAPI 结果页正文抓取改为汇总打分之后由代码判定：候选综合分 = `source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2`；问题整体分为全部候选综合分的均值。若整体分 ≥ `WEB_SEARCH_QUESTION_PASS_SCORE`（默认 0.75）则不抓正文；若整体分未达标，则在 SerpAPI 候选中按 `(relevance_score + source_confidence_score) / 2` 选取最高分条目，仅当该分 ≥ `WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）时抓取该 top1 URL 正文（压缩为 `url` / `title` / 截断正文），并由代码把正文写入该条候选的 `snippet`（有页面 title 时同步更新 `title`），不二次进入汇总 LLM、不重打分。
+  - 进入汇总 LLM 前必须压缩 `tool_outputs`：SerpAPI / Tavily 只保留 `title` / `url` / `snippet` / `published_at`；SerpAPI 条数不超过本次请求返回（由 `WEB_SEARCH_SERPAPI_NUM` 限制），Tavily 条数不超过 `WEB_SEARCH_TAVILY_MAX_RESULTS`；Playwright 只保留 `url` / `title` / 截断正文，正文上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`（默认 3000）；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
   - Playwright 使用 headless + isolated Chrome；导航与快照必须在同一显式 MCP 会话内完成，避免新会话返回 `about:blank`。
   - 单次 LLM 汇总失败时，当前实现使用 SerpAPI 首条结果形成低可信度候选；没有可用结果时设置 Web HITL。
 - 普通页面 403、超时、空正文或 `about:blank` 在已有搜索摘要时只降低可信度；登录墙、验证码和权限确认才保留 HITL。
@@ -152,7 +156,8 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - `expected_evidence`、`minimum_evidence_standard`、`question_evidence_status` 必须使用同一组 `question_id` 作为 key。
 - `evidence_items` 是唯一证据目录，key 为 `evidence_id`。
 - `conflicts` 是唯一冲突目录，key 为 `conflict_id`。
-- `required_source_types`、`previous_search_tasks`、`evidence_sufficiency_score`、`evidence_sufficiency_threshold`、`raw_search_results`、`web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
+- `required_source_types`、`evidence_sufficiency_score`、`evidence_sufficiency_threshold`、`web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
+- 搜索流水线中间结果在其最后一个消费者执行后清空；最终 State 不重复保留 Web、本地、清洗和聚类阶段的完整候选结果。
 - 跨结构关联只保存 ID，不复制问题正文或证据正文。
 - `evidence_items` 和 `conflicts` 使用字典合并 reducer，`executed_nodes` 使用列表累加 reducer，以支持并行分支写入。
 - 必须存在的业务对象读取时使用 `[]` 或显式校验，不用 `.get()` 静默隐藏上游错误。
@@ -309,6 +314,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - `load_prompt` 当前强制校验 `name`、`version`、`owner_node`、`system_prompt`、`user_prompt_template`；`input_schema`、`output_schema` 是文档契约，运行时结构由 `src/llm/structured_outputs.py` 的 Pydantic 模型保证。
 - 运行时模型角色以 `src/config/settings.py` 的 `DASHSCOPE_MODEL_FIELDS` 和节点传入的 role 为准；YAML `model_role` 当前仅作文档。
 - `local_structured_search.yml` 的 `snippet_template` 被运行时使用；其他展示模板字段当前主要作为文档配置。
+- 使用 DashScope / OpenAI 兼容接口的 `with_structured_output` 时，对应 Prompt 的 `messages` 必须包含 `json` 字样（大小写均可）；否则供应商会拒绝 `response_format=json_object` 请求。
 
 
 
@@ -354,7 +360,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - LLM 基础配置：`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`。节点模型覆盖：`SAFETY_GUARD_MODEL`、`RESEARCH_PLANNER_MODEL`、`SEARCH_TASK_PLANNER_MODEL`、`WEB_SEARCH_SUBAGENT_MODEL`、`LOCAL_DOCUMENT_SEARCH_MODEL`。
 - 只有模型名为 `deepseek-chat` 或 `deepseek-reasoner` 时使用 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`；DashScope 托管的 `deepseek-v4-*` 仍使用 DashScope。
 - 工作流必需配置：`MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS`、`HITL_CONFLICT_THRESHOLD`、`REVIEW_PASS_SCORE`。冲突项当前 `hitl_need_score=6.0`，默认阈值 9.0 时不触发冲突 HITL。
-- 在线检索配置：`SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_FETCH_SERPAPI_TOP_N`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源。
+- 在线检索配置：`SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_QUESTION_PASS_SCORE`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限。
 - Playwright MCP 通过 stdio 启动 `npx -y @playwright/mcp --headless --isolated --browser chrome`；Tavily 通过 `mcp-remote` stdio 代理；Context7 使用 streamable HTTP。
 - DevTools 配置：`ENABLE_HITL_DEVTOOLS` 默认 true，`HITL_DEVTOOLS_HEADLESS` 默认 false；仅在 Web HITL 且结果需要登录时实际调用 `chrome-devtools-mcp@latest`。
 - 本地 Markdown 根路径由 `LOCAL_DOCUMENTS_BASE_PATH` 管理，在首次本地检索时校验。
@@ -427,7 +433,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - 当前 evaluator：
   - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
   - `research_report_pairwise_preference`：LLM-as-Judge Pairwise A/B，从回答问题、证据支撑、覆盖、限制披露、引用、结构和安全七个维度比较报告。
-  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，只保留工具名、成功状态、有效结果数、正文长度、失败类型和截断错误，不把搜索结果或页面正文写入主 Graph State，也不增加 summarize LLM 的职责；evaluator 只按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`。
+  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，只保留工具名、成功状态、有效结果数、正文长度、失败类型和截断错误，并以列表累加 reducer 保留各轮紧凑记录，不把搜索结果或页面正文写入主 Graph State，也不增加 summarize LLM 的职责；evaluator 只按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`。
   - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果；没有触发外部 worker 的 run 标记为 `not_applicable`。
 - 当前 LangSmith dataset 定义：`researchops-input-guard-v1`、`researchops-standard-research-v1`、`researchops-url-web-search-v1`、`researchops-local-and-structured-v1`、`researchops-edge-cases-v1`。
 - `src/dataset` 提供 dataset 创建、样例追加、split 管理和 Pairwise A/B 运行脚本；均为手动入口，不进入主 Graph。

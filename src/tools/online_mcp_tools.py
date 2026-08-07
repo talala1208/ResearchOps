@@ -350,13 +350,14 @@ def _run_async(coro):
 
 
 @tool
-def tavily_mcp_search(query: str) -> str:
+def tavily_mcp_search(query: str, max_results: int = 5) -> str:
     """通过 Tavily remote MCP 搜索网页资料。"""
 
+    requested = max(1, min(int(max_results), 10))
     try:
         result = _run_async(
             asyncio.wait_for(
-                _tavily_search_async(query=query, max_results=5),
+                _tavily_search_async(query=query, max_results=requested),
                 timeout=ONLINE_MCP_TIMEOUT_SECONDS,
             )
         )

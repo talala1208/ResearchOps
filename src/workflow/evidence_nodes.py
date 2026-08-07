@@ -152,6 +152,7 @@ def deduplicate_and_cluster(state: ResearchState) -> dict[str, Any]:
     return {
         **record_node(state, "deduplicate_and_cluster"),
         "evidence_clusters": evidence_clusters,
+        "sanitized_results": [],
     }
 
 
@@ -243,6 +244,7 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
         "entity_index": entity_index,
         "hitl_decisions": [],
         "hitl_required": hitl_required,
+        "evidence_clusters": [],
     }
 
 

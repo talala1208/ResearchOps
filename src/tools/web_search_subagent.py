@@ -1,8 +1,13 @@
 """Web Search SubAgent 工具。
 
-当前实现采用“确定性调度 + 单次 LLM 汇总”：
+当前实现采用“确定性调度 + LLM 汇总打分 + 条件正文抓取”：
 - 不再使用内部 `create_agent` ReAct 循环，避免工具自由循环和重复 trace。
 - 只调度 SerpAPI / Tavily / Context7 / headless Playwright 页面读取工具。
+- SerpAPI 按 NUM 取回后全部进入汇总打分，再按 KEEP_TOP_N 保留；Tavily 仅由 MAX_RESULTS 控制。
+- SerpAPI 结果页正文抓取发生在首次汇总打分之后：问题整体分达标则跳过；
+  未达标且 SerpAPI top1（仅看 relevance / source_confidence）够高时抓取正文，
+  并由代码写入该条候选，不再二次汇总打分。
+- 进入汇总 LLM 前压缩 tool_outputs，原始输出仍用于评测记录。
 - 不包含 DevTools；DevTools 只属于 Web HITL 节点。
 - 不包含 Claude Code / Codex；外部 Agent worker 只属于 strategy_iteration。
 """
@@ -12,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from typing import Any
 
 from langchain.tools import tool
@@ -41,7 +47,139 @@ WEB_SOURCE_TYPES = {
     "traffic_data",
 }
 URL_PATTERN = re.compile(r"https?://[^\s]+")
-DEFAULT_SERPAPI_PAGE_FETCH_TOP_N = 1
+DEFAULT_SERPAPI_NUM = 5
+DEFAULT_SERPAPI_KEEP_TOP_N = 3
+DEFAULT_TAVILY_MAX_RESULTS = 5
+DEFAULT_CONTEXT7_MAX_CHARS = 4000
+DEFAULT_PLAYWRIGHT_MAX_CHARS = 3000
+DEFAULT_QUESTION_PASS_SCORE = 0.75
+DEFAULT_SERPAPI_TOP1_HIGH_SCORE = 0.7
+_TOOL_CONCURRENCY_LIMITS = {
+    "serp_api_search": 3,
+    "tavily_mcp_search": 1,
+    "context7_mcp_query": 2,
+}
+_PLAYWRIGHT_CONCURRENCY_LIMIT = 1
+_TOOL_SEMAPHORES = {
+    tool_name: threading.Semaphore(limit)
+    for tool_name, limit in _TOOL_CONCURRENCY_LIMITS.items()
+}
+_PLAYWRIGHT_SEMAPHORE = threading.Semaphore(_PLAYWRIGHT_CONCURRENCY_LIMIT)
+
+
+def _read_bounded_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """读取带上下限的整数环境变量；非法值回退默认。"""
+
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return max(minimum, min(value, maximum))
+
+
+def _read_bounded_float_env(
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """读取带上下限的浮点环境变量；非法值回退默认。"""
+
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    return max(minimum, min(value, maximum))
+
+
+def _serpapi_num() -> int:
+    """SerpAPI 请求条数。"""
+
+    return _read_bounded_int_env(
+        "WEB_SEARCH_SERPAPI_NUM",
+        default=DEFAULT_SERPAPI_NUM,
+        minimum=1,
+        maximum=10,
+    )
+
+
+def _serpapi_keep_top_n() -> int:
+    """汇总打分后保留的 SerpAPI 结果条数。"""
+
+    return _read_bounded_int_env(
+        "WEB_SEARCH_SERPAPI_KEEP_TOP_N",
+        default=DEFAULT_SERPAPI_KEEP_TOP_N,
+        minimum=1,
+        maximum=10,
+    )
+
+
+def _tavily_max_results() -> int:
+    """Tavily 请求条数。"""
+
+    return _read_bounded_int_env(
+        "WEB_SEARCH_TAVILY_MAX_RESULTS",
+        default=DEFAULT_TAVILY_MAX_RESULTS,
+        minimum=1,
+        maximum=10,
+    )
+
+
+def _context7_max_chars() -> int:
+    """Context7 文档正文截断长度。"""
+
+    return _read_bounded_int_env(
+        "WEB_SEARCH_CONTEXT7_MAX_CHARS",
+        default=DEFAULT_CONTEXT7_MAX_CHARS,
+        minimum=500,
+        maximum=20000,
+    )
+
+
+def _playwright_max_chars() -> int:
+    """Playwright 正文截断长度。"""
+
+    return _read_bounded_int_env(
+        "WEB_SEARCH_PLAYWRIGHT_MAX_CHARS",
+        default=DEFAULT_PLAYWRIGHT_MAX_CHARS,
+        minimum=500,
+        maximum=20000,
+    )
+
+
+def _question_pass_score() -> float:
+    """单个 Web 问题汇总后的通过分阈值。"""
+
+    return _read_bounded_float_env(
+        "WEB_SEARCH_QUESTION_PASS_SCORE",
+        default=DEFAULT_QUESTION_PASS_SCORE,
+        minimum=0.0,
+        maximum=1.0,
+    )
+
+
+def _serpapi_top1_high_score() -> float:
+    """触发 SerpAPI top1 正文抓取的门槛分（relevance/confidence 均值）。"""
+
+    return _read_bounded_float_env(
+        "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE",
+        default=DEFAULT_SERPAPI_TOP1_HIGH_SCORE,
+        minimum=0.0,
+        maximum=1.0,
+    )
 
 
 def _extract_url(value: str) -> str | None:
@@ -84,12 +222,13 @@ def serp_api_search(query: str) -> str:
     if not api_key:
         raise ValueError("缺少 SERPAPI_API_KEY，无法调用 SerpAPI。")
 
+    num = _serpapi_num()
     search = GoogleSearch(
         {
             "engine": "google",
             "q": query,
             "api_key": api_key,
-            "num": 5,
+            "num": num,
             "hl": "zh-cn",
         }
     )
@@ -98,7 +237,7 @@ def serp_api_search(query: str) -> str:
         raise RuntimeError(f"SerpAPI 调用失败：{payload['error']}")
 
     results = []
-    for item in payload.get("organic_results", []):
+    for item in payload.get("organic_results", [])[:num]:
         link = item.get("link")
         results.append(
             {
@@ -135,62 +274,189 @@ def _loads_tool_json(raw: str) -> Any:
         return raw
 
 
+def _semaphore_for_tool(name: str) -> threading.Semaphore | None:
+    """按工具名返回分级并发信号量。"""
+
+    if name.startswith("playwright_mcp_fetch"):
+        return _PLAYWRIGHT_SEMAPHORE
+    return _TOOL_SEMAPHORES.get(name)
+
+
 def _call_tool(name: str, tool_obj: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """确定性调用单个 LangChain tool 并返回结构化调用记录。"""
 
+    semaphore = _semaphore_for_tool(name)
+
+    def _invoke() -> dict[str, Any]:
+        try:
+            raw_output = tool_obj.invoke(payload)
+            return {
+                "tool_name": name,
+                "ok": True,
+                "input": payload,
+                "output": _loads_tool_json(raw_output),
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 - 工具失败要进入 HITL 原因
+            return {
+                "tool_name": name,
+                "ok": False,
+                "input": payload,
+                "output": None,
+                "error": str(exc),
+            }
+
+    if semaphore is None:
+        return _invoke()
+    with semaphore:
+        return _invoke()
+
+
+def _score_or_default(value: Any, default: float) -> float:
+    """把候选分规范到 [0, 1]，非法值回退默认。"""
+
     try:
-        raw_output = tool_obj.invoke(payload)
-        return {
-            "tool_name": name,
-            "ok": True,
-            "input": payload,
-            "output": _loads_tool_json(raw_output),
-            "error": None,
-        }
-    except Exception as exc:  # noqa: BLE001 - 工具失败要进入 HITL 原因
-        return {
-            "tool_name": name,
-            "ok": False,
-            "input": payload,
-            "output": None,
-            "error": str(exc),
-        }
+        if value is None:
+            return default
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(score, 1.0))
 
 
-def _serpapi_result_urls(tool_output: dict[str, Any]) -> list[str]:
-    """从 SerpAPI 结构化结果中提取可继续读取正文的 URL。"""
+def _candidate_composite_score(item: dict[str, Any]) -> float:
+    """计算单条候选综合分，与证据层可靠性权重一致。"""
 
-    if tool_output["tool_name"] != "serp_api_search" or not tool_output.get("ok"):
-        return []
-    output = tool_output.get("output")
-    if not isinstance(output, dict):
-        return []
-    results = output.get("results")
+    return round(
+        _score_or_default(item.get("source_confidence_score"), 0.5) * 0.35
+        + _score_or_default(item.get("freshness_score"), 0.5) * 0.15
+        + _score_or_default(item.get("relevance_score"), 0.5) * 0.3
+        + _score_or_default(item.get("answer_coverage_score"), 0.5) * 0.2,
+        4,
+    )
+
+
+def _serpapi_top1_gate_score(item: dict[str, Any]) -> float:
+    """SerpAPI top1 门槛分：仅看 relevance 与 source_confidence。"""
+
+    return round(
+        (
+            _score_or_default(item.get("relevance_score"), 0.0)
+            + _score_or_default(item.get("source_confidence_score"), 0.0)
+        )
+        / 2.0,
+        4,
+    )
+
+
+def _is_serpapi_result(item: dict[str, Any]) -> bool:
+    """判断候选是否来自 SerpAPI。"""
+
+    source_name = str(item.get("source_name") or "").lower()
+    return "serp" in source_name
+
+
+def _question_overall_score(result: dict[str, Any]) -> float:
+    """问题整体分：全部候选综合分均值。"""
+
+    scores = [
+        _candidate_composite_score(item)
+        for item in result.get("results", [])
+        if isinstance(item, dict)
+    ]
+    if not scores:
+        return 0.0
+    return round(sum(scores) / len(scores), 4)
+
+
+def _keep_serpapi_top_n_after_score(result: dict[str, Any]) -> dict[str, Any]:
+    """汇总打分后仅对 SerpAPI 候选按综合分保留 top N。"""
+
+    results = result.get("results")
     if not isinstance(results, list):
-        return []
+        return result
 
-    urls = []
+    serp_results: list[dict[str, Any]] = []
+    other_results: list[dict[str, Any]] = []
     for item in results:
         if not isinstance(item, dict):
             continue
-        url = item.get("url")
-        if isinstance(url, str) and url.startswith(("http://", "https://")):
-            urls.append(url)
-    return urls
+        if _is_serpapi_result(item):
+            serp_results.append(item)
+        else:
+            other_results.append(item)
+
+    keep_n = _serpapi_keep_top_n()
+    serp_kept = sorted(
+        serp_results,
+        key=_candidate_composite_score,
+        reverse=True,
+    )[:keep_n]
+    return {
+        **result,
+        "results": other_results + serp_kept,
+    }
 
 
-def _serpapi_page_fetch_top_n() -> int:
-    """读取 SerpAPI 结果正文抓取数量。"""
+def _serpapi_top1_fetch_url(result: dict[str, Any]) -> str | None:
+    """整体分未达标且 SerpAPI top1 门槛够高时，返回应抓取的 URL。"""
 
-    raw_value = os.getenv(
-        "WEB_SEARCH_FETCH_SERPAPI_TOP_N",
-        str(DEFAULT_SERPAPI_PAGE_FETCH_TOP_N),
+    if _question_overall_score(result) >= _question_pass_score():
+        return None
+
+    serp_results = [
+        item
+        for item in result.get("results", [])
+        if isinstance(item, dict) and _is_serpapi_result(item)
+    ]
+    if not serp_results:
+        return None
+
+    top1 = max(serp_results, key=_serpapi_top1_gate_score)
+    if _serpapi_top1_gate_score(top1) < _serpapi_top1_high_score():
+        return None
+
+    url = top1.get("url_or_path")
+    if isinstance(url, str) and url.startswith(("http://", "https://")):
+        return url
+    return None
+
+
+def _enrich_result_with_page_content(
+    result: dict[str, Any],
+    *,
+    fetch_url: str,
+    page_output: dict[str, Any],
+) -> dict[str, Any]:
+    """把 Playwright 抓取的正文确定性写入对应 SerpAPI 候选。"""
+
+    compact = _compact_playwright_output(
+        page_output.get("output"),
+        url=fetch_url,
     )
-    try:
-        value = int(raw_value)
-    except ValueError:
-        return DEFAULT_SERPAPI_PAGE_FETCH_TOP_N
-    return max(0, min(value, 5))
+    content = str(compact.get("content") or "").strip()
+    if not content:
+        return result
+
+    page_title = compact.get("title")
+    updated_results: list[Any] = []
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            updated_results.append(item)
+            continue
+        if item.get("url_or_path") != fetch_url:
+            updated_results.append(item)
+            continue
+        enriched = dict(item)
+        if isinstance(page_title, str) and page_title.strip():
+            enriched["title"] = page_title.strip()
+        enriched["snippet"] = content
+        updated_results.append(enriched)
+
+    return {
+        **result,
+        "results": updated_results,
+    }
 
 
 @traceable(name="collect_web_tool_outputs", run_type="chain")
@@ -203,7 +469,11 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
 
     if source_type in WEB_SOURCE_TYPES:
         tool_outputs.append(
-            _call_tool("tavily_mcp_search", tavily_mcp_search, {"query": query})
+            _call_tool(
+                "tavily_mcp_search",
+                tavily_mcp_search,
+                {"query": query, "max_results": _tavily_max_results()},
+            )
         )
 
     if source_type in DOC_SOURCE_TYPES:
@@ -211,12 +481,13 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
             _call_tool("context7_mcp_query", context7_mcp_query, {"topic": query})
         )
 
-    serpapi_output = _call_tool(
-        "serp_api_search",
-        serp_api_search,
-        {"query": query},
+    tool_outputs.append(
+        _call_tool(
+            "serp_api_search",
+            serp_api_search,
+            {"query": query},
+        )
     )
-    tool_outputs.append(serpapi_output)
 
     url = _extract_url(query)
     if url is not None:
@@ -228,22 +499,233 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
             )
         )
 
-    if source_type in WEB_SOURCE_TYPES:
-        serpapi_fetch_top_n = _serpapi_page_fetch_top_n()
-        if serpapi_fetch_top_n > 0:
-            for index, result_url in enumerate(
-                _serpapi_result_urls(serpapi_output)[:serpapi_fetch_top_n],
-                start=1,
-            ):
-                tool_outputs.append(
-                    _call_tool(
-                        f"playwright_mcp_fetch_serpapi_result_page_{index}",
-                        playwright_mcp_fetch_page,
-                        {"url": result_url},
-                    )
-            )
-
     return tool_outputs
+
+
+def _maybe_fetch_serpapi_page_and_enrich(
+    tool_outputs: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """打分后按阈值条件抓取 SerpAPI top1 正文，并由代码写入该条候选。"""
+
+    fetch_url = _serpapi_top1_fetch_url(result)
+    if fetch_url is None:
+        return tool_outputs, result
+
+    page_output = _call_tool(
+        "playwright_mcp_fetch_serpapi_result_page_1",
+        playwright_mcp_fetch_page,
+        {"url": fetch_url},
+    )
+    updated_outputs = [*tool_outputs, page_output]
+    if not page_output.get("ok"):
+        return updated_outputs, result
+
+    enriched = _enrich_result_with_page_content(
+        result,
+        fetch_url=fetch_url,
+        page_output=page_output,
+    )
+    return updated_outputs, enriched
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    """截断文本并标记省略。"""
+
+    text = value if isinstance(value, str) else _tool_output_text(value)
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"
+
+
+def _compact_search_result_item(item: Any) -> dict[str, Any] | None:
+    """压缩单条搜索结果，只保留汇总所需字段。"""
+
+    if not isinstance(item, dict):
+        return None
+    url = item.get("url") or item.get("link") or item.get("url_or_path")
+    title = item.get("title")
+    snippet = item.get("snippet") or item.get("content") or item.get("description")
+    published_at = item.get("published_at") or item.get("date") or item.get("published_date")
+    if not title and not url and not snippet:
+        return None
+    return {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "published_at": published_at,
+    }
+
+
+def _extract_tavily_result_items(output: Any) -> list[Any]:
+    """尽量从 Tavily 原始输出提取结果列表。"""
+
+    if isinstance(output, list):
+        return output
+    if not isinstance(output, dict):
+        return []
+    for key in ("results", "organic_results", "data"):
+        value = output.get(key)
+        if isinstance(value, list):
+            return value
+    raw_result = output.get("raw_result")
+    if isinstance(raw_result, str):
+        try:
+            parsed = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return []
+        return _extract_tavily_result_items(parsed)
+    if isinstance(raw_result, dict):
+        return _extract_tavily_result_items(raw_result)
+    if isinstance(raw_result, list):
+        return raw_result
+    return []
+
+
+def _compact_playwright_output(output: Any, *, url: str | None) -> dict[str, Any]:
+    """压缩 Playwright 输出，只保留 url / title / 截断正文。"""
+
+    output_dict = _tool_output_as_dict(output)
+    title = (
+        output_dict.get("title")
+        or output_dict.get("page_title")
+        or output_dict.get("name")
+    )
+    candidates = [
+        output_dict.get("content"),
+        output_dict.get("text"),
+        output_dict.get("snapshot"),
+        output_dict.get("page_text"),
+        output_dict.get("snapshot_result"),
+        output_dict.get("raw_text"),
+        output_dict.get("navigation_result"),
+    ]
+    body = ""
+    for candidate in candidates:
+        text = _tool_output_text(candidate).strip()
+        if len(text) > len(body):
+            body = text
+    if not body and not isinstance(output, dict):
+        body = _tool_output_text(output).strip()
+    return {
+        "url": url or output_dict.get("url"),
+        "title": title,
+        "content": _truncate_text(body, _playwright_max_chars()),
+    }
+
+
+def _compact_context7_output(output: Any) -> dict[str, Any]:
+    """压缩 Context7 输出，截断文档正文。"""
+
+    max_chars = _context7_max_chars()
+    if isinstance(output, dict):
+        raw_result = output.get("raw_result")
+        if isinstance(raw_result, str):
+            try:
+                parsed = json.loads(raw_result)
+            except json.JSONDecodeError:
+                return {
+                    "provider": output.get("provider"),
+                    "ok": output.get("ok", True),
+                    "docs": _truncate_text(raw_result, max_chars),
+                }
+            if isinstance(parsed, dict):
+                return {
+                    "provider": output.get("provider"),
+                    "ok": output.get("ok", True),
+                    "library_id": parsed.get("library_id"),
+                    "resolve_result": _truncate_text(
+                        parsed.get("resolve_result"),
+                        max(500, max_chars // 4),
+                    ),
+                    "docs_result": _truncate_text(parsed.get("docs_result"), max_chars),
+                }
+        return {
+            "provider": output.get("provider"),
+            "ok": output.get("ok", True),
+            "library_id": output.get("library_id"),
+            "resolve_result": _truncate_text(
+                output.get("resolve_result"),
+                max(500, max_chars // 4),
+            ),
+            "docs_result": _truncate_text(
+                output.get("docs_result") or output.get("raw_result") or output,
+                max_chars,
+            ),
+        }
+    return {"docs": _truncate_text(output, max_chars)}
+
+
+def _compact_tool_output_for_summarize(tool_output: dict[str, Any]) -> dict[str, Any]:
+    """压缩单条工具输出，降低汇总 LLM 输入体积。"""
+
+    tool_name = str(tool_output.get("tool_name") or "")
+    compact: dict[str, Any] = {
+        "tool_name": tool_name,
+        "ok": bool(tool_output.get("ok")),
+        "error": tool_output.get("error"),
+    }
+    output = tool_output.get("output")
+
+    if tool_name == "serp_api_search":
+        output_dict = _tool_output_as_dict(output)
+        results = output_dict.get("results") or output_dict.get("organic_results") or []
+        compact_results = []
+        if isinstance(results, list):
+            for item in results:
+                compacted = _compact_search_result_item(item)
+                if compacted is not None:
+                    compact_results.append(compacted)
+        compact["output"] = {
+            "provider": output_dict.get("provider", "serpapi"),
+            "results": compact_results,
+        }
+        return compact
+
+    if tool_name == "tavily_mcp_search":
+        items = _extract_tavily_result_items(output)
+        compact_results = []
+        for item in items:
+            compacted = _compact_search_result_item(item)
+            if compacted is not None:
+                compact_results.append(compacted)
+        if compact_results:
+            compact["output"] = {
+                "provider": "tavily_mcp",
+                "results": compact_results,
+            }
+        else:
+            compact["output"] = {
+                "provider": "tavily_mcp",
+                "docs": _truncate_text(output, _context7_max_chars()),
+            }
+        return compact
+
+    if tool_name == "context7_mcp_query":
+        compact["output"] = _compact_context7_output(output)
+        return compact
+
+    if tool_name.startswith("playwright_mcp_fetch"):
+        input_payload = tool_output.get("input")
+        url = None
+        if isinstance(input_payload, dict):
+            maybe_url = input_payload.get("url")
+            if isinstance(maybe_url, str):
+                url = maybe_url
+        compact["output"] = _compact_playwright_output(output, url=url)
+        return compact
+
+    compact["output"] = _truncate_text(output, _context7_max_chars())
+    return compact
+
+
+def _compact_tool_outputs_for_summarize(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """压缩全部工具输出后再交给汇总 LLM。"""
+
+    return [_compact_tool_output_for_summarize(item) for item in tool_outputs]
 
 
 def _tool_output_as_dict(value: Any) -> dict[str, Any]:
@@ -487,6 +969,7 @@ def _summarize_web_tool_outputs(
 ) -> dict[str, Any]:
     """用单次 LLM 调用把工具输出汇总成标准 WebSearchSubAgentResult。"""
 
+    compact_outputs = _compact_tool_outputs_for_summarize(tool_outputs)
     prompt = load_prompt("web_search_subagent.yml")
     user_prompt = render_prompt_template(
         prompt["user_prompt_template"],
@@ -497,11 +980,10 @@ def _summarize_web_tool_outputs(
             "expected_evidence_json": json.dumps(
                 task.get("expected_evidence"),
                 ensure_ascii=False,
-                indent=2,
             ),
             "query": task["query"],
             "source_type": task["source_type"],
-            "tool_outputs_json": json.dumps(tool_outputs, ensure_ascii=False, indent=2),
+            "tool_outputs_json": json.dumps(compact_outputs, ensure_ascii=False),
         },
     )
     model = build_chat_model("web_search_subagent").with_structured_output(
@@ -518,13 +1000,18 @@ def _summarize_web_tool_outputs(
 
 @tool("web_search_subagent_tool")
 def web_search_subagent_tool(task_json: str) -> str:
-    """确定性调度 Web 工具，并用单次 LLM 汇总候选证据。"""
+    """确定性调度 Web 工具，汇总打分后再按阈值条件抓取正文。"""
 
     payload = json.loads(task_json)
     task = payload["task"] if "task" in payload else payload
     tool_outputs = _collect_web_tool_outputs(task)
     try:
         result = _summarize_web_tool_outputs(task, tool_outputs)
+        result = _keep_serpapi_top_n_after_score(result)
+        tool_outputs, result = _maybe_fetch_serpapi_page_and_enrich(
+            tool_outputs,
+            result,
+        )
     except Exception as exc:  # noqa: BLE001 - 汇总失败时不能重启工具循环
         result = _fallback_result_from_tool_outputs(task, tool_outputs)
         result["hitl_reason"] = f"Web 工具汇总失败：{exc}；{result['hitl_reason']}"

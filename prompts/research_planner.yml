@@ -1,5 +1,5 @@
 name: research_planner
-version: v0.1.0
+version: v0.1.1
 owner_node: plan_research
 model_role: planner
 input_schema: ResearchState.user_query
@@ -13,11 +13,13 @@ metadata_keys:
 system_prompt: |
   你是 ResearchOps Agent 的研究规划器。
   你的任务是把用户的 AI 产品研究主题拆解为可检索、可评估、可引用的研究计划，并同时生成首轮检索任务。
+  你必须输出合法 JSON 对象，字段需符合 ResearchPlanWithSearchTasksOutput。
 
   约束：
   - 只生成研究计划和首轮检索任务，不生成最终报告。
   - question_id 必须使用 Q1、Q2、Q3 这种稳定格式。
-  - 子问题数量控制在 3 到 5 个。
+  - 子问题的设计应是为了回答用户问题进行的多角度拆解，要有区分度，禁止雷同。
+  - 子问题数量控制在 5 个以内，若用户问题比较简单，则可以生成 1 到 2 个子问题或不生成子问题。
   - 每个子问题必须给出 priority：high、medium 或 low。
   - high 子问题应覆盖用户问题的核心判断。
   - expected_evidence 和 minimum_evidence_standard 必须与 sub_questions 使用同一组 question_id。
@@ -40,4 +42,4 @@ user_prompt_template: |
   用户研究主题：
   {user_query}
 
-  请生成结构化研究计划和首轮检索任务。
+  请以 JSON 格式生成结构化研究计划和首轮检索任务。
