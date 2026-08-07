@@ -117,6 +117,54 @@ class ToolReturnsTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["provider"], "tavily_mcp")
 
+    def test_you_com_api_search_returns_json(self) -> None:
+        """you.com Search 工具应解析 web 结果为统一 results 形态。"""
+
+        fake_payload = {
+            "results": {
+                "web": [
+                    {
+                        "url": "https://example.com/a",
+                        "title": "Example A",
+                        "description": "desc",
+                        "snippets": ["more detail"],
+                        "page_age": "2026-04-01T19:00:51",
+                    }
+                ]
+            },
+            "metadata": {"query": "Cursor docs", "latency": 0.1},
+        }
+
+        class FakeResponse:
+            def read(self) -> bytes:
+                return json.dumps(fake_payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+                return False
+
+        with (
+            patch.dict(os.environ, {"YDC_API_KEY": "test-ydc-key"}),
+            patch.object(
+                web_search_subagent,
+                "urlopen",
+                return_value=FakeResponse(),
+            ) as mock_urlopen,
+        ):
+            result = web_search_subagent.you_com_api_search.invoke("Cursor docs")
+
+        payload = json.loads(result)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["provider"], "you_com")
+        self.assertEqual(payload["results"][0]["url"], "https://example.com/a")
+        self.assertIn("desc", payload["results"][0]["snippet"])
+        self.assertEqual(payload["results"][0]["published_at"], "2026-04-01T19:00:51")
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("ydc-index.io/v1/search", request.full_url)
+        self.assertEqual(request.get_header("X-api-key"), "test-ydc-key")
+
     def test_context7_mcp_query_returns_json(self) -> None:
         """Context7 MCP 工具返回 JSON，且 raw_result 可再解析。"""
 

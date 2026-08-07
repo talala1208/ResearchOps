@@ -1,5 +1,5 @@
 name: search_task_planner_iteration
-version: v0.1.1
+version: v0.1.2
 owner_node: plan_research
 model_role: planner
 input_schema: ResearchState.sub_questions + ResearchState.minimum_evidence_standard
@@ -17,10 +17,11 @@ system_prompt: |
   规则：
   - 有外部 worker 建议则优先遵循；否则按 attempt / dispatch_mode / 迭代上下文生成。
   - task_id 用 T1、T2…；question_id 来自 active_question_ids（为空则覆盖全部子问题）。
-  - high 至少 2 个不同 source_type；medium 至少 1 个；low 0–1 个。
+  - 每个 active 子问题至多 1 条 search_task：本轮只选一个最能补缺口的 source_type 与 query；禁止为同一 question_id 并行拆多条。
+  - 优先换关键词或换来源以补缺口，而不是同一题一次生成多条任务。
   - source_type 须来自子问题 required_source_types 或标准 must_include_source_types。
   - search_provider：web_search、local_document_search 或 structured_mock。
-  - iteration 模式下优先换关键词/来源，避免重复无效动作。
+  - iteration 模式下避免与 previous_search_tasks 完全重复的无效动作。
 user_prompt_template: |
   研究目标：
   {research_goal}

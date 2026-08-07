@@ -1,11 +1,11 @@
 """Web Search SubAgent 工具。
 
-当前实现采用“分流物化 + 仅 SerpAPI 进汇总 LLM + 代码合并”：
+当前实现采用“分流物化 + 可切换主搜索（serp / ydc）进汇总 LLM + 代码合并”：
 - Tavily：保留自带 score，代码物化，不进汇总 LLM。
 - Context7：官方文档不打搜索相关性分，代码保留 docs_result/resolve_result，不进汇总 LLM。
-- SerpAPI：压缩后进汇总 LLM 打四维分并判断是否抓正文；代码写入综合 score、keep top N，
-  再按 LLM 主决策 + 硬分否决/兜底可选 Playwright 写 body。
-- Playwright：query URL 由代码物化；Serp 结果页抓取不二次进汇总 LLM。
+- 主搜索由 `WEB_SEARCH_PROVIDER=serp|ydc` 切换；选中的 provider 压缩后进汇总 LLM 打四维分并判断是否抓正文。
+  代码写入综合 score、keep top N，再按 LLM 主决策 + 硬分否决/兜底可选 Playwright 写 body。
+- Playwright：query URL 由代码物化；主搜索结果页抓取不二次进汇总 LLM。
 - 最终由代码合并各来源候选，并按规范化 URL 去重。
 - 不包含 DevTools；DevTools 只属于 Web HITL 节点。
 - 不包含 Claude Code / Codex；外部 Agent worker 只属于 strategy_iteration。
@@ -19,6 +19,9 @@ import re
 import threading
 from ast import literal_eval
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from langchain.tools import tool
 from langsmith import traceable
@@ -67,8 +70,13 @@ DEFAULT_TAVILY_MAX_RESULTS = 5
 DEFAULT_CONTEXT7_MAX_CHARS = 4000
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 3000
 DEFAULT_SERPAPI_TOP1_HIGH_SCORE = 0.7
+YOU_COM_SEARCH_URL = "https://ydc-index.io/v1/search"
+DEFAULT_YOU_COM_TIMEOUT_SECONDS = 30
+# WEB_SEARCH_PROVIDER 仅接受：serp | ydc
+DEFAULT_WEB_SEARCH_PROVIDER = "serp"
 _TOOL_CONCURRENCY_LIMITS = {
     "serp_api_search": 3,
+    "you_com_api_search": 3,
     "tavily_mcp_search": 1,
     "context7_mcp_query": 2,
 }
@@ -119,7 +127,7 @@ def _read_bounded_float_env(
 
 
 def _serpapi_num() -> int:
-    """SerpAPI 请求条数。"""
+    """主搜索请求条数（serp / ydc 共用）。"""
 
     return _read_bounded_int_env(
         "WEB_SEARCH_SERPAPI_NUM",
@@ -127,6 +135,23 @@ def _serpapi_num() -> int:
         minimum=1,
         maximum=10,
     )
+
+
+def _web_search_provider() -> str:
+    """读取主搜索 provider：仅 serp 或 ydc。"""
+
+    raw = os.getenv("WEB_SEARCH_PROVIDER", DEFAULT_WEB_SEARCH_PROVIDER).strip().lower()
+    if raw == "ydc":
+        return "ydc"
+    return "serp"
+
+
+def _configured_search_tool() -> tuple[str, Any]:
+    """返回当前环境变量选中的主搜索工具名与对象。"""
+
+    if _web_search_provider() == "ydc":
+        return "you_com_api_search", you_com_api_search
+    return "serp_api_search", serp_api_search
 
 
 def _serpapi_keep_top_n() -> int:
@@ -267,6 +292,104 @@ def serp_api_search(query: str) -> str:
     )
 
 
+def _you_com_snippet(item: dict[str, Any]) -> str:
+    """从 you.com web 结果拼装 snippet。"""
+
+    parts: list[str] = []
+    description = item.get("description")
+    if isinstance(description, str) and description.strip():
+        parts.append(description.strip())
+    snippets = item.get("snippets")
+    if isinstance(snippets, list):
+        for snippet in snippets:
+            if isinstance(snippet, str) and snippet.strip():
+                parts.append(snippet.strip())
+    return " ".join(parts).strip()
+
+
+@tool
+def you_com_api_search(query: str) -> str:
+    """通过 you.com（YDC）Search API 搜索网页资料；作为 SerpAPI 备选。"""
+
+    api_key = os.getenv("YDC_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("缺少 YDC_API_KEY，无法调用 you.com Search。")
+
+    num = _serpapi_num()
+    request = Request(
+        f"{YOU_COM_SEARCH_URL}?{urlencode({'query': query})}",
+        headers={
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=DEFAULT_YOU_COM_TIMEOUT_SECONDS) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise RuntimeError(
+            f"you.com Search 调用失败：HTTP {exc.code} {body[:500]}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(f"you.com Search 调用失败：{exc.reason}") from exc
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("you.com Search 返回了非法 JSON。") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("you.com Search 返回值必须是 JSON 对象。")
+
+    web_items = []
+    results_obj = payload.get("results")
+    if isinstance(results_obj, dict):
+        maybe_web = results_obj.get("web")
+        if isinstance(maybe_web, list):
+            web_items = maybe_web
+
+    results: list[dict[str, Any]] = []
+    for index, item in enumerate(web_items[:num], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        url = item.get("url")
+        snippet = _you_com_snippet(item)
+        if not (
+            isinstance(title, str)
+            and title.strip()
+            and isinstance(url, str)
+            and url.startswith(("http://", "https://"))
+            and snippet
+        ):
+            continue
+        published_at = item.get("page_age")
+        results.append(
+            {
+                "title": title.strip(),
+                "url": url,
+                "snippet": snippet[:2000],
+                "source": "you_com",
+                "published_at": published_at if isinstance(published_at, str) else None,
+                "position": index,
+            }
+        )
+
+    return json.dumps(
+        {
+            "provider": "you_com",
+            "ok": True,
+            "query": query,
+            "results": results,
+            "search_metadata": payload.get("metadata")
+            if isinstance(payload.get("metadata"), dict)
+            else {},
+        },
+        ensure_ascii=False,
+    )
+
+
 def _loads_tool_json(raw: str) -> Any:
     """解析工具 JSON 字符串；解析失败时保留原始文本。"""
 
@@ -292,11 +415,21 @@ def _call_tool(name: str, tool_obj: Any, payload: dict[str, Any]) -> dict[str, A
     def _invoke() -> dict[str, Any]:
         try:
             raw_output = tool_obj.invoke(payload)
+            output = _loads_tool_json(raw_output)
+            # 工具 JSON 内 ok=false（如 MCP ConnectError）时，外层也记失败
+            if isinstance(output, dict) and output.get("ok") is False:
+                return {
+                    "tool_name": name,
+                    "ok": False,
+                    "input": payload,
+                    "output": output,
+                    "error": str(output.get("error") or "tool returned ok=false"),
+                }
             return {
                 "tool_name": name,
                 "ok": True,
                 "input": payload,
-                "output": _loads_tool_json(raw_output),
+                "output": output,
                 "error": None,
             }
         except Exception as exc:  # noqa: BLE001 - 工具失败要进入 HITL 原因
@@ -341,10 +474,14 @@ def _candidate_composite_score(item: dict[str, Any]) -> float:
 
 
 def _is_serpapi_result(item: dict[str, Any]) -> bool:
-    """判断候选是否来自 SerpAPI。"""
+    """判断候选是否来自主搜索链路（serp / ydc）。"""
 
     source_name = str(item.get("source_name") or "").lower()
-    return "serp" in source_name
+    return (
+        "serp" in source_name
+        or source_name in {"ydc", "you_com", "youcom"}
+        or "you_com" in source_name
+    )
 
 
 def _attach_serpapi_composite_scores(result: dict[str, Any]) -> dict[str, Any]:
@@ -574,12 +711,9 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
             _call_tool("context7_mcp_query", context7_mcp_query, {"topic": query})
         )
 
+    search_tool_name, search_tool = _configured_search_tool()
     tool_outputs.append(
-        _call_tool(
-            "serp_api_search",
-            serp_api_search,
-            {"query": query},
-        )
+        _call_tool(search_tool_name, search_tool, {"query": query})
     )
 
     url = _extract_url(query)
@@ -595,8 +729,64 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     return tool_outputs
 
 
+# 强信号：几乎可判定为登录墙 / 验证码 / 权限墙（避免被导航栏 “Sign in” 误触发）
+_PLAYWRIGHT_STRONG_LOGIN_RE = re.compile(
+    r"(?:"
+    r"please\s+(?:sign|log)\s+in\s+to\s+continue"
+    r"|sign\s+in\s+to\s+(?:continue|access|view|read)"
+    r"|log\s+in\s+to\s+(?:continue|access|view|read)"
+    r"|you\s+(?:must|need\s+to)\s+(?:sign|log)\s+in"
+    r"|authentication\s+required"
+    r"|verify\s+you\s+are\s+(?:a\s+)?human"
+    r"|\bcaptcha\b"
+    r"|recaptcha"
+    r"|hcaptcha"
+    r"|验证码"
+    r"|请(?:先)?登录"
+    r"|需要登录"
+    r"|登录后(?:才能|继续|查看|访问)"
+    r"|access\s+denied"
+    r"|\bunauthorized\b"
+    r"|401\s+unauthorized"
+    r"|403\s+forbidden"
+    r"|cf-browser-verification"
+    r"|just\s+a\s+moment(?:\.\.\.|…)"
+    r"|attention\s+required"
+    r")",
+    re.IGNORECASE,
+)
+_PLAYWRIGHT_LOGIN_FORM_CUE_RE = re.compile(
+    r"(?:"
+    r"\bpassword\b"
+    r"|\busername\b"
+    r"|type=[\"']password[\"']"
+    r"|密码"
+    r"|用户名"
+    r"|continue\s+with\s+(?:google|github|microsoft|sso|apple)"
+    r"|单点登录"
+    r"|enter\s+your\s+(?:password|credentials)"
+    r"|输入(?:密码|账号|凭证)"
+    r")",
+    re.IGNORECASE,
+)
+_PLAYWRIGHT_WEAK_LOGIN_RE = re.compile(
+    r"(?:\bsign\s+in\b|\blog\s+in\b|\blogin\b|登录)",
+    re.IGNORECASE,
+)
+_PLAYWRIGHT_LOGIN_URL_RE = re.compile(
+    r"/(?:login|signin|sign-in|log-in|auth|sso|account/login)(?:/|$|\?)",
+    re.IGNORECASE,
+)
+# 弱信号仅在短页或伴随表单时生效，避免文档站导航栏误触发 DevTools
+_PLAYWRIGHT_SHORT_LOGIN_PAGE_CHARS = 1200
+
+
 def _playwright_login_signal(tool_output: dict[str, Any]) -> str | None:
-    """从 Playwright 工具输出中确定性识别登录墙 / 验证码 / 权限墙。"""
+    """从 Playwright 工具输出中确定性识别登录墙 / 验证码 / 权限墙。
+
+    不把导航栏常见的 “Sign in / Log in / 登录” 单独当成登录墙；
+    需强措辞、登录 URL、或「弱措辞 + 表单线索 / 极短页」组合。
+    """
 
     text = " ".join(
         [
@@ -604,21 +794,40 @@ def _playwright_login_signal(tool_output: dict[str, Any]) -> str | None:
             _tool_output_text(tool_output.get("output")),
         ]
     )
-    lowered = text.lower()
-    checks = (
-        ("验证码", "Playwright 检测到验证码墙"),
-        ("captcha", "Playwright 检测到验证码墙"),
-        ("登录", "Playwright 检测到登录墙"),
-        ("sign in", "Playwright 检测到登录墙"),
-        ("log in", "Playwright 检测到登录墙"),
-        ("login", "Playwright 检测到登录墙"),
-        ("权限", "Playwright 检测到权限墙"),
-        ("unauthorized", "Playwright 检测到权限墙"),
-        ("access denied", "Playwright 检测到权限墙"),
-    )
-    for keyword, reason in checks:
-        if keyword in lowered:
-            return reason
+    url = _playwright_tool_url(tool_output) or ""
+    compact = text.strip()
+    if not compact and not url:
+        return None
+
+    strong = _PLAYWRIGHT_STRONG_LOGIN_RE.search(compact)
+    if strong is not None:
+        matched = strong.group(0).lower()
+        if any(
+            token in matched
+            for token in ("captcha", "recaptcha", "hcaptcha", "验证码", "human")
+        ):
+            return "Playwright 检测到验证码墙"
+        if any(
+            token in matched
+            for token in ("unauthorized", "access denied", "403", "401")
+        ):
+            return "Playwright 检测到权限墙"
+        return "Playwright 检测到登录墙"
+
+    form_cues = _PLAYWRIGHT_LOGIN_FORM_CUE_RE.search(compact) is not None
+    weak_count = len(_PLAYWRIGHT_WEAK_LOGIN_RE.findall(compact))
+    url_looks_login = bool(url and _PLAYWRIGHT_LOGIN_URL_RE.search(url))
+
+    if url_looks_login and (weak_count > 0 or form_cues or len(compact) < _PLAYWRIGHT_SHORT_LOGIN_PAGE_CHARS):
+        return "Playwright 检测到登录墙"
+    if weak_count > 0 and form_cues:
+        return "Playwright 检测到登录墙"
+    # 极短页且多次出现弱登录措辞：更像登录页本身，而非带导航的文档
+    if (
+        weak_count >= 2
+        and 0 < len(compact) < _PLAYWRIGHT_SHORT_LOGIN_PAGE_CHARS
+    ):
+        return "Playwright 检测到登录墙"
     return None
 
 
@@ -715,24 +924,22 @@ def _finalize_playwright_only_hitl(
         tool_name = str(tool_output.get("tool_name") or "")
         if not tool_name.startswith("playwright_mcp_fetch"):
             continue
+        url = _playwright_tool_url(tool_output)
         reason = _playwright_login_signal(tool_output)
         if reason is None:
-            # 成功抓到的正文里也可能是登录页
+            # 成功抓到的正文里也可能是登录页（带上 url 供路径启发式）
             compact = _compact_playwright_output(
                 tool_output.get("output"),
-                url=_playwright_tool_url(tool_output),
+                url=url,
             )
-            body_signal = _playwright_login_signal(
+            reason = _playwright_login_signal(
                 {
                     "error": None,
+                    "input": {"url": url} if url else {},
                     "output": {"content": compact.get("content")},
                 }
             )
-            reason = body_signal
-        if reason is None:
-            continue
-        url = _playwright_tool_url(tool_output)
-        if url is None:
+        if reason is None or url is None:
             continue
         updated = _mark_result_requires_login(updated, url=url, reason=reason)
 
@@ -910,17 +1117,18 @@ def _coerce_structured_value(value: Any) -> Any:
     if isinstance(value, dict):
         return value
     if isinstance(value, list):
-        if value and all(
-            isinstance(item, dict)
-            and (
-                item.get("type") == "text"
-                or isinstance(item.get("text"), str)
-            )
-            for item in value
-        ):
+        if _looks_like_mcp_text_blocks(value):
             unwrapped = unwrap_text_content(value).strip()
             if unwrapped:
                 return _coerce_structured_value(unwrapped)
+            # unwrap 失败时仍尝试拼接 text 字段再解析
+            joined = "\n".join(
+                str(item.get("text")).strip()
+                for item in value
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ).strip()
+            if joined:
+                return _coerce_structured_value(joined)
         return value
     if not isinstance(value, str):
         return value
@@ -939,17 +1147,53 @@ def _coerce_structured_value(value: Any) -> Any:
     return value
 
 
+def _looks_like_mcp_text_blocks(value: list[Any]) -> bool:
+    """判断是否为 MCP text block 列表（而非搜索结果条目列表）。"""
+
+    if not value:
+        return False
+    return all(
+        isinstance(item, dict)
+        and (
+            item.get("type") == "text"
+            or (
+                isinstance(item.get("text"), str)
+                and not (
+                    item.get("url")
+                    or item.get("link")
+                    or item.get("content")
+                    or item.get("snippet")
+                    or item.get("title")
+                )
+            )
+        )
+        for item in value
+    )
+
+
 def _extract_tavily_result_items(output: Any) -> list[Any]:
-    """尽量从 Tavily 原始输出提取结果列表。"""
+    """尽量从 Tavily 原始输出提取结果列表。
+
+    真实 Tavily remote MCP 常见形态：
+    raw_result = [{"type":"text","text":"{\\"results\\":[...]}", "id":"..."}]
+    """
 
     coerced = _coerce_structured_value(output)
     if isinstance(coerced, list):
+        if _looks_like_mcp_text_blocks(coerced):
+            # 再解包一次，避免把 text blocks 误当成结果条目
+            reparsed = _coerce_structured_value(unwrap_text_content(coerced))
+            if reparsed is not coerced:
+                return _extract_tavily_result_items(reparsed)
+            return []
         return [item for item in coerced if isinstance(item, dict)]
     if not isinstance(coerced, dict):
         return []
     for key in ("results", "organic_results", "data"):
         value = _coerce_structured_value(coerced.get(key))
         if isinstance(value, list):
+            if _looks_like_mcp_text_blocks(value):
+                return _extract_tavily_result_items(value)
             return [item for item in value if isinstance(item, dict)]
     raw_result = coerced.get("raw_result")
     if raw_result is None:
@@ -1358,19 +1602,20 @@ def _merge_all_web_tool_results_by_code(
 def _tool_outputs_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """汇总 LLM 只接收 SerpAPI 工具输出。"""
+    """汇总 LLM 只接收 WEB_SEARCH_PROVIDER 选中的主搜索工具输出。"""
 
+    search_tool_name, _ = _configured_search_tool()
     return [
         item
         for item in tool_outputs
-        if item.get("tool_name") == "serp_api_search"
+        if item.get("tool_name") == search_tool_name
     ]
 
 
 def _extract_serpapi_results_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """从工具输出中提取并压缩 SerpAPI 结果；Tavily/Context7/Playwright 一律不进入。"""
+    """从当前主搜索工具输出中提取并压缩结果。"""
 
     serp_results: list[dict[str, Any]] = []
     for tool_output in _tool_outputs_for_summarize(tool_outputs):
@@ -1494,7 +1739,7 @@ def _valid_search_result_count(tool_output: dict[str, Any]) -> int:
 
     tool_name = str(tool_output["tool_name"])
     output = _tool_output_as_dict(tool_output.get("output"))
-    if tool_name == "serp_api_search":
+    if tool_name in {"serp_api_search", "you_com_api_search"}:
         results = output.get("results") or output.get("organic_results") or []
         return sum(
             1
@@ -1622,20 +1867,26 @@ def _fallback_result_from_tool_outputs(
 ) -> dict[str, Any]:
     """当 LLM 汇总不可用时，从工具输出生成确定性降级结果。"""
 
+    search_tool_name, _ = _configured_search_tool()
+    source_name = "ydc" if search_tool_name == "you_com_api_search" else "serp"
     for tool_output in tool_outputs:
-        if tool_output["tool_name"] != "serp_api_search" or not tool_output.get("ok"):
+        if tool_output.get("tool_name") != search_tool_name:
+            continue
+        if not tool_output.get("ok"):
             continue
         output = tool_output.get("output")
-        serp_results = output.get("results") if isinstance(output, dict) else []
-        if serp_results:
-            first_result = serp_results[0]
+        search_results = output.get("results") if isinstance(output, dict) else []
+        if search_results:
+            first_result = search_results[0]
             return {
                 "results": [
                     {
-                        "title": first_result.get("title") or f"SerpAPI 搜索结果：{task['query']}",
-                        "url_or_path": first_result.get("url") or f"serpapi://search/{task['task_id']}",
+                        "title": first_result.get("title")
+                        or f"{source_name} 搜索结果：{task['query']}",
+                        "url_or_path": first_result.get("url")
+                        or f"{source_name}://search/{task['task_id']}",
                         "snippet": first_result.get("snippet") or "",
-                        "source_name": "serpapi",
+                        "source_name": source_name,
                         "published_at": first_result.get("published_at"),
                         "requires_login": False,
                         "blocked_reason": None,
@@ -1643,7 +1894,9 @@ def _fallback_result_from_tool_outputs(
                         "answer_coverage_score": 0.4,
                         "source_confidence_score": 0.6,
                         "freshness_score": 0.5,
-                        "score_reason": "LLM 汇总失败时由 SerpAPI 首条结果生成的候选分，可信度较低。",
+                        "score_reason": (
+                            f"LLM 汇总失败时由 {source_name} 首条结果生成的候选分，可信度较低。"
+                        ),
                         "score": 0.545,
                     }
                 ],

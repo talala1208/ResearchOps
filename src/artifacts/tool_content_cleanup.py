@@ -33,7 +33,10 @@ def unwrap_text_content(value: Any) -> str:
                 parsed = json.loads(text)
             except json.JSONDecodeError:
                 return text
-            return unwrap_text_content(parsed)
+            # Tavily 等 MCP 常把整段 JSON（含 results）放进 text block。
+            # 若解析后不是可解包正文结构，保留原 JSON 字符串，供物化层再 json.loads。
+            nested = unwrap_text_content(parsed)
+            return nested if nested else text
         return text
     if isinstance(value, list):
         parts: list[str] = []

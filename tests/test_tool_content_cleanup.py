@@ -25,6 +25,27 @@ class ToolContentCleanupTest(unittest.TestCase):
         self.assertIn("第一段", text)
         self.assertIn("第二段", text)
 
+    def test_unwrap_keeps_json_payload_when_not_text_shaped(self) -> None:
+        """Tavily MCP：text 内是含 results 的 JSON 时，不得解成空串。"""
+
+        payload = {
+            "results": [
+                {
+                    "title": "Doc",
+                    "url": "https://example.com/a",
+                    "content": "snippet body",
+                    "score": 0.9,
+                }
+            ]
+        }
+        text = unwrap_text_content(
+            [{"type": "text", "text": json.dumps(payload), "id": "x"}]
+        )
+        self.assertIn('"results"', text)
+        self.assertIn("snippet body", text)
+        parsed = json.loads(text)
+        self.assertEqual(parsed["results"][0]["url"], "https://example.com/a")
+
     def test_context7_docs_rejects_payload_dict(self) -> None:
         cleaned = clean_context7_docs(
             {

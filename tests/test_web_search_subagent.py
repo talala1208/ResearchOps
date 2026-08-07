@@ -96,7 +96,7 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
                 "ok": False,
                 "error": "Please sign in to continue",
                 "input": {"url": "https://example.com/login-required"},
-                "output": {"snapshot_result": "login form"},
+                "output": {"snapshot_result": "login form password"},
             }
         ]
 
@@ -106,6 +106,62 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
         self.assertTrue(finalized["results"][0]["requires_login"])
         self.assertTrue(finalized["results"][0]["playwright_hitl"])
         self.assertIn("登录", finalized["hitl_reason"])
+
+    def test_nav_sign_in_alone_does_not_trigger_hitl(self) -> None:
+        """文档站导航栏仅有 Sign in 时不应触发 Web HITL / DevTools。"""
+
+        from src.tools.web_search_subagent import _playwright_login_signal
+
+        docs_page = (
+            "Skip to content\nSign in\nDocs home\n"
+            "# Cascade Models\n"
+            "Real documentation body describing available models and pricing.\n"
+            * 20
+        )
+        self.assertIsNone(
+            _playwright_login_signal(
+                {
+                    "error": None,
+                    "input": {"url": "https://docs.example.com/models"},
+                    "output": {"content": docs_page},
+                }
+            )
+        )
+
+        result = {
+            "results": [
+                {
+                    "title": "Docs",
+                    "url": "https://docs.example.com/models",
+                    "url_or_path": "https://docs.example.com/models",
+                    "snippet": "models",
+                    "source_name": "serpapi",
+                    "requires_login": False,
+                    "body": docs_page,
+                }
+            ],
+            "web_hitl_required": False,
+            "hitl_reason": None,
+        }
+        tool_outputs = [
+            {
+                "tool_name": "playwright_mcp_fetch_serpapi_result_page_1",
+                "ok": True,
+                "error": None,
+                "input": {"url": "https://docs.example.com/models"},
+                "output": {
+                    "ok": True,
+                    "raw_result": {
+                        "url": "https://docs.example.com/models",
+                        "title": "Docs",
+                        "content": docs_page,
+                    },
+                },
+            }
+        ]
+        finalized = _finalize_playwright_only_hitl(tool_outputs, result)
+        self.assertFalse(finalized["web_hitl_required"])
+        self.assertFalse(finalized["results"][0].get("requires_login"))
 
 
 class WebSearchSubAgentDispatchTest(unittest.TestCase):
@@ -120,14 +176,36 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             "query": "Cursor docs",
             "source_type": "official_docs",
         }
-        with patch.object(web_search_subagent, "_call_tool") as call_tool:
-            call_tool.side_effect = lambda name, tool_obj, payload: {
-                "tool_name": name,
-                "ok": True,
-                "input": payload,
-                "output": [],
-                "error": None,
-            }
+        with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}),
+            patch.object(web_search_subagent, "_call_tool") as call_tool,
+        ):
+            def fake_call(name, tool_obj, payload):
+                if name == "serp_api_search":
+                    return {
+                        "tool_name": name,
+                        "ok": True,
+                        "input": payload,
+                        "output": {
+                            "results": [
+                                {
+                                    "title": "Cursor docs",
+                                    "url": "https://docs.cursor.com",
+                                    "snippet": "official",
+                                }
+                            ]
+                        },
+                        "error": None,
+                    }
+                return {
+                    "tool_name": name,
+                    "ok": True,
+                    "input": payload,
+                    "output": {},
+                    "error": None,
+                }
+
+            call_tool.side_effect = fake_call
             outputs = web_search_subagent._collect_web_tool_outputs(task)
 
         tool_names = [item["tool_name"] for item in outputs]
@@ -135,6 +213,59 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             tool_names,
             ["tavily_mcp_search", "context7_mcp_query", "serp_api_search"],
         )
+        self.assertNotIn("you_com_api_search", tool_names)
+
+    def test_collect_uses_ydc_when_provider_is_ydc(self) -> None:
+        """WEB_SEARCH_PROVIDER=ydc 时应只调用 you.com，不调用 SerpAPI。"""
+
+        task = {
+            "task_id": "T1",
+            "question_id": "Q1",
+            "query": "Cursor pricing",
+            "source_type": "pricing_page",
+        }
+
+        def fake_call(name, tool_obj, payload):
+            return {
+                "tool_name": name,
+                "ok": True,
+                "input": payload,
+                "output": {
+                    "results": [
+                        {
+                            "title": "You result",
+                            "url": "https://example.com/you",
+                            "snippet": "you.com snippet",
+                        }
+                    ]
+                }
+                if name == "you_com_api_search"
+                else {},
+                "error": None,
+            }
+
+        with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "ydc"}),
+            patch.object(web_search_subagent, "_call_tool", side_effect=fake_call),
+        ):
+            outputs = web_search_subagent._collect_web_tool_outputs(task)
+            summarize_outputs = web_search_subagent._tool_outputs_for_summarize(outputs)
+            extracted = web_search_subagent._extract_serpapi_results_for_summarize(
+                outputs
+            )
+
+        tool_names = [item["tool_name"] for item in outputs]
+        self.assertEqual(
+            tool_names,
+            ["tavily_mcp_search", "you_com_api_search"],
+        )
+        self.assertNotIn("serp_api_search", tool_names)
+        self.assertEqual(
+            [item["tool_name"] for item in summarize_outputs],
+            ["you_com_api_search"],
+        )
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["url"], "https://example.com/you")
 
 
     def test_url_query_dispatches_page_observation_tools(self) -> None:
@@ -193,7 +324,10 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                 "error": None,
             }
 
-        with patch.object(web_search_subagent, "_call_tool", side_effect=fake_call_tool):
+        with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}),
+            patch.object(web_search_subagent, "_call_tool", side_effect=fake_call_tool),
+        ):
             outputs = web_search_subagent._collect_web_tool_outputs(task)
 
         tool_names = [item["tool_name"] for item in outputs]
@@ -246,15 +380,18 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             },
         ]
 
-        serp_results = web_search_subagent._extract_serpapi_results_for_summarize(
-            tool_outputs
-        )
+        with patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}):
+            serp_results = web_search_subagent._extract_serpapi_results_for_summarize(
+                tool_outputs
+            )
+            compact = web_search_subagent._compact_tool_outputs_for_summarize(
+                tool_outputs
+            )
         self.assertEqual(len(serp_results), 3)
         self.assertEqual(
             set(serp_results[0].keys()),
             {"title", "url", "snippet", "published_at"},
         )
-        compact = web_search_subagent._compact_tool_outputs_for_summarize(tool_outputs)
         self.assertEqual([item["tool_name"] for item in compact], ["serp_api_search"])
         self.assertEqual(compact[0]["output"]["results"], serp_results)
 
@@ -322,10 +459,13 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             },
         ]
 
-        with patch.object(
-            web_search_subagent,
-            "build_chat_model",
-            return_value=FakeModel(),
+        with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}),
+            patch.object(
+                web_search_subagent,
+                "build_chat_model",
+                return_value=FakeModel(),
+            ),
         ):
             web_search_subagent._summarize_web_tool_outputs(
                 {
@@ -413,6 +553,62 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(candidates[0]["url"], "https://tavily.example/doc")
         self.assertEqual(candidates[0]["snippet"], "答案相关摘要")
         self.assertEqual(candidates[0]["source_name"], "tavily")
+
+    def test_materialize_tavily_from_mcp_text_block_raw_result(self) -> None:
+        """真实 Tavily MCP：raw_result 为 text block 包一整段 results JSON。"""
+
+        inner = {
+            "query": "LangGraph checkpoint",
+            "results": [
+                {
+                    "title": "checkpoints | langgraph",
+                    "url": "https://reference.langchain.com/python/langgraph/checkpoints",
+                    "content": "Checkpoints allow LangGraph agents to persist state.",
+                    "score": 0.88,
+                }
+            ],
+        }
+        tool_outputs = [
+            {
+                "tool_name": "tavily_mcp_search",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "ok": True,
+                    "provider": "tavily_mcp",
+                    "raw_result": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(inner, ensure_ascii=False),
+                            "id": "tavily-1",
+                        }
+                    ],
+                },
+            }
+        ]
+        candidates = web_search_subagent._materialize_tavily_results_from_tool_outputs(
+            tool_outputs
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_name"], "tavily")
+        self.assertEqual(
+            candidates[0]["url"],
+            "https://reference.langchain.com/python/langgraph/checkpoints",
+        )
+        self.assertIn("Checkpoints", candidates[0]["snippet"])
+        self.assertEqual(candidates[0]["score"], 0.88)
+
+        merged = web_search_subagent._merge_all_web_tool_results_by_code(
+            tool_outputs,
+            {
+                "ok": True,
+                "results": [],
+                "web_hitl_required": False,
+                "web_hitl_reason": None,
+            },
+        )
+        self.assertEqual(merged["code_merge"]["input_counts"]["tavily"], 1)
+        self.assertEqual(merged["code_merge"]["source_counts"].get("tavily"), 1)
 
     def test_materialize_handles_python_repr_and_nested_raw_result(self) -> None:
         """兼容旧版 str(dict) raw_result，以及 Playwright 嵌套 snapshot。"""
@@ -1036,10 +1232,13 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             def invoke(self, messages):  # noqa: ANN001
                 return FakeResponse()
 
-        with patch.object(
-            web_search_subagent,
-            "build_chat_model",
-            return_value=FakeModel(),
+        with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}),
+            patch.object(
+                web_search_subagent,
+                "build_chat_model",
+                return_value=FakeModel(),
+            ),
         ):
             result = web_search_subagent._summarize_web_tool_outputs(
                 {
@@ -1111,6 +1310,7 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             )
 
         with (
+            patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}),
             patch.object(
                 web_search_subagent,
                 "_collect_web_tool_outputs",
