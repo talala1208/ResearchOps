@@ -10,6 +10,7 @@ from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import InputGuardOutput
 from src.schemas.state import ResearchState
 from src.workflow.node_utils import record_node
+from src.workflow.report_nodes import append_cited_evidence_appendix
 
 
 SENSITIVE_PATTERNS = [
@@ -91,6 +92,7 @@ def safety_review(state: ResearchState) -> dict[str, Any]:
             + "检测到风险："
             + "、".join(detected_risks)
         )
+    final_report = append_cited_evidence_appendix(final_report, state)
 
     return {
         **record_node(state, "safety_review"),

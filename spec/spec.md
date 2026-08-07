@@ -122,9 +122,9 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `check_step_budget` | `search_steps`、`max_search_steps`、`evidence_sufficiency_result` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
 | `strategy_iteration` | `evidence_sufficiency_result`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；`search_iteration_context` 中上一轮任务只保留 `task_id` / `query` / `source_type` 摘要；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用外部 worker |
 | `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
-| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations |
+| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations；证据上下文为**全量短目录 + 按题精选落盘长文**（见报告证据供给） |
 | `review_research_report` | `report_draft`、`evidence_matrix`、`evidence_items`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | LLM 结构化质量 Review；输出评分与 `revision_suggestions`；不评估安全边界；`degraded=true` 时直接放行 |
-| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文 |
+| `safety_review` | `report_draft`、`review_result`、`safety_revision_count`、`evidence_items`、`entity_index` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文；定稿时由代码追加引用证据附录 |
 | `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 当前为线性示意（由 `executed_nodes` 列表生成，不还原 fan-out/fan-in）；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
 
@@ -134,11 +134,13 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
   - `web_search_sub_agent` 对多个 Web `search_tasks` 使用有界线程池并发；默认并发度为 `WEB_SEARCH_TASK_CONCURRENCY=3`，最小为 1；合并结果时保持原任务顺序，任一任务抛错时节点整体失败。
   - 单任务内部仍串行调用工具，顺序不变；工具级限流为 Playwright=1、Tavily=1、Context7=2、SerpAPI=3，避免高成本 MCP / Chrome 会话风暴。
   - 所有 Web 任务调用 SerpAPI；请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）。压缩保留 `title` / `url` / `snippet` / `published_at` 后进入汇总 LLM；LLM 输出四维分，并输出顶层 `needs_page_fetch` / `fetch_url` / `fetch_reason`（是否抓正文由 LLM 主决策：snippet 已够则 false；缺关键数字/条款/长文等则 true，且只选一条 keep 后候选 URL）。代码计算综合分 `score = source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2` 并写入结果，再按 `score` 保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
+  - Tavily / Context7 / Playwright 不经汇总 LLM，物化时做确定性轻量清洗（解包 text blocks、规范空白、截断；Context7 不以整个 raw payload 充当 docs；Playwright 去掉极短导航噪声行）；Online MCP 工具必须把结构化结果 JSON 序列化进 `raw_result`（禁止 `str(dict)`），物化层解包 `raw_result`（兼容 JSON 字符串 / Python repr / text blocks）；DevTools 仅作 HITL 观测，结果经 `compact_devtools_observation` 截断后写入 `web_hitl_decisions`，不进入证据库。
   - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）。Tavily 不进入汇总 LLM；代码按 `title` / `score` / `url` / `snippet`(取 `content`) / `published_at` 保留并物化为候选。
   - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP；官方文档不进入汇总 LLM、不做搜索相关性打分；代码保留 `docs_result` / `resolve_result`（及 `library_id`）并物化为候选，`snippet` 不承载文档正文；证据层对其采用权威加权分桶，并把 `docs_result` / `resolve_result` 写入 `EvidenceItem`。
   - query 含 URL 时，由 Playwright 抓取该 URL，代码物化为带 `body` 的候选，不进入汇总 LLM。
-  - SerpAPI 结果页正文：keep top N 后由代码解析抓取目标——主决策为 LLM 的 `needs_page_fetch` + 合法 `fetch_url`（必须属于 keep 后 Serp 候选）；`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）仅作否决与兜底：目标条 `relevance_score` 未严格大于该阈值则否决且不改抓其他页；LLM 要求抓取但 `fetch_url` 缺失或不在候选中时，回退为 keep 后 `relevance_score` 最高且严格大于阈值的一条。成功后在该条写入 `body`（截断正文，上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`，默认 3000），保留原 `snippet`，不二次进入汇总 LLM。
-  - 最终由代码合并 Tavily、Context7、query-URL Playwright 与打分后的 SerpAPI 候选，并按规范化 URL/路径去重（同 URL 优先保留含 `body`、更高分、更完整正文的候选）；进入汇总 LLM 的 `tool_outputs` 仅含 SerpAPI 压缩结果；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
+  - SerpAPI 结果页正文：keep top N 后由代码解析抓取目标——主决策为 LLM 的 `needs_page_fetch` + 合法 `fetch_url`（必须属于 keep 后 Serp 候选）；`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）仅作否决与兜底：目标条 `relevance_score` 未严格大于该阈值则否决且不改抓其他页；LLM 要求抓取但 `fetch_url` 缺失或不在候选中时，回退为 keep 后 `relevance_score` 最高且严格大于阈值的一条。成功后在该条写入 `body`（截断正文，上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`，默认 3000），保留原 `snippet`，不二次进入汇总 LLM。该步骤以独立 LangSmith span `fetch_serpapi_page_and_enrich_body` 记录，并在结果中写入紧凑 `page_fetch`（`attempted` / `fetch_url` / `ok` / `body_appended` / `body_chars` / `reason`）便于观测；URL 匹配使用规范化比较。
+  - query 含 URL 的 Playwright 物化以 span `materialize_query_url_playwright_body` 记录。
+  - 最终由代码合并 Tavily、Context7、query-URL Playwright 与打分后的 SerpAPI 候选，并按规范化 URL/路径去重（同 URL 优先保留含 `body`、更高分、更完整正文的候选）；该步骤以独立 LangSmith span `merge_all_web_tool_results_by_code` 记录，并写入紧凑 `code_merge`（各来源输入数、合并后数量、`source_counts`、`with_body_count`）；其子 span 包括 `materialize_tavily_candidates`、`materialize_context7_candidates`、`materialize_query_url_playwright_body`。进入汇总 LLM 的输入仅为 SerpAPI 压缩结果；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
   - Playwright 使用 headless + isolated Chrome；导航与快照必须在同一显式 MCP 会话内完成，避免新会话返回 `about:blank`。
   - 单次 LLM 汇总失败时，当前实现使用 SerpAPI 首条结果形成低可信度候选；没有可用结果时不触发 Web HITL。
 - Web HITL 仅服务 Playwright：仅当 Playwright（query URL 抓取或 Serp 结果页抓取）确定性检测到登录墙、验证码或权限墙时，才将对应候选标为 `requires_login=true` 并设置 `web_hitl_required=true`；SerpAPI 汇总 LLM 不输出、不判断 HITL；Tavily、Context7 与“无搜索结果”均不得触发 Web HITL。普通页面 403、超时、空正文或 `about:blank` 只降低可信度，不进 Web HITL。
@@ -192,6 +194,8 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
 - `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"`、`search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成（LLM）；`used_in_final_report` / `final_citation_count` 以报告实际引用的合法 `evidence_id` 为准。
+- `safety_review` 在写入 `final_report` 时由**代码**追加 `## 引用证据` 附录（不经 LLM）：只列实际引用的代号与 title；按 `source_type` 区分 Web（非 `local_document` / `structured_mock`）与 Local；Web 有 http(s) URL 时写 `[Exx][title](url)`，Local 与无 URL 的 Web 写 `[Exx] title`。若正文已含同名章节则不重复追加。
+- 报告 Prompt 的证据上下文采用分层供给：全量短目录（title / source / url / 短摘要）+ 按题精选落盘长文（有 `content_path`、按可靠性取 top N、单条与总字符封顶）；无长文时须在 limitations 披露摘要级证据边界。
 - Input Guard 不通过时跳过规划和检索，但仍经过报告 Review、Safety Review 和产物持久化。
 - `degraded = true` 的报告由质量 Review 直接放行，继续执行 Safety Review。
 - `review_research_report` 负责研究质量，不负责安全审查；不通过且预算未耗尽时，下一次生成必须消费 `revision_suggestions`。
@@ -385,6 +389,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - 只有模型名为 `deepseek-chat` 或 `deepseek-reasoner` 时使用 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`；DashScope 托管的 `deepseek-v4-*` 仍使用 DashScope。
 - 工作流必需配置：`MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS`、`HITL_CONFLICT_THRESHOLD`、`REVIEW_PASS_SCORE`。冲突项当前 `hitl_need_score=6.0`，默认阈值 9.0 时不触发冲突 HITL。
 - 在线检索配置：`SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限。
+- 报告证据供给配置：`REPORT_EVIDENCE_SNIPPET_MAX_CHARS`（短目录摘要，默认 300）、`REPORT_EVIDENCE_BODY_MAX_CHARS`（单条精选长文，默认 2500）、`REPORT_EVIDENCE_BODIES_PER_QUESTION`（每题最多精选条数，默认 2）、`REPORT_EVIDENCE_BODIES_TOTAL_CHARS`（精选长文总预算，默认 28000）。仅 `content_path` 可读且长度 ≥ 400 的证据进入精选正文；按 `reliability_score` 排序，超出总预算时从低分起不再纳入。
 - Playwright MCP 通过 stdio 启动 `npx -y @playwright/mcp --headless --isolated --browser chrome`；Tavily 通过 `mcp-remote` stdio 代理；Context7 使用 streamable HTTP。
 - DevTools 配置：`ENABLE_HITL_DEVTOOLS` 默认 true，`HITL_DEVTOOLS_HEADLESS` 默认 false；仅在 Web HITL 且结果需要登录时实际调用 `chrome-devtools-mcp@latest`。
 - 本地 Markdown 根路径由 `LOCAL_DOCUMENTS_BASE_PATH` 管理，在首次本地检索时校验。

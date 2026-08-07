@@ -246,11 +246,136 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             },
         ]
 
+        serp_results = web_search_subagent._extract_serpapi_results_for_summarize(
+            tool_outputs
+        )
+        self.assertEqual(len(serp_results), 3)
+        self.assertEqual(
+            set(serp_results[0].keys()),
+            {"title", "url", "snippet", "published_at"},
+        )
         compact = web_search_subagent._compact_tool_outputs_for_summarize(tool_outputs)
         self.assertEqual([item["tool_name"] for item in compact], ["serp_api_search"])
-        serp = compact[0]["output"]["results"]
-        self.assertEqual(len(serp), 3)
-        self.assertEqual(set(serp[0].keys()), {"title", "url", "snippet", "published_at"})
+        self.assertEqual(compact[0]["output"]["results"], serp_results)
+
+    def test_summarize_prompt_excludes_non_serp_tools(self) -> None:
+        """汇总 LLM 的 prompt 不得包含 Tavily/Context7/Playwright 输出。"""
+
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            content = {
+                "results": [],
+                "needs_page_fetch": False,
+                "fetch_url": None,
+                "fetch_reason": "无候选",
+            }
+
+        class FakeModel:
+            def bind(self, **kwargs):  # noqa: ANN003
+                return self
+
+            def invoke(self, messages):  # noqa: ANN001
+                captured["user_prompt"] = messages[1][1]
+                return FakeResponse()
+
+        mixed_outputs = [
+            {
+                "tool_name": "tavily_mcp_search",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "tavily_mcp",
+                    "results": [
+                        {
+                            "title": "Tavily Only",
+                            "url": "https://tavily.example/x",
+                            "content": "should not appear in summarize prompt",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool_name": "context7_mcp_query",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "context7_mcp",
+                    "docs_result": "CONTEXT7_SECRET_DOCS",
+                },
+            },
+            {
+                "tool_name": "serp_api_search",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "serpapi",
+                    "results": [
+                        {
+                            "title": "Serp Title",
+                            "url": "https://serp.example/a",
+                            "snippet": "Serp snippet",
+                            "published_at": None,
+                        }
+                    ],
+                },
+            },
+        ]
+
+        with patch.object(
+            web_search_subagent,
+            "build_chat_model",
+            return_value=FakeModel(),
+        ):
+            web_search_subagent._summarize_web_tool_outputs(
+                {
+                    "task_id": "T1",
+                    "question_id": "Q1",
+                    "query": "test",
+                    "source_type": "blog",
+                    "question": "test question",
+                    "expected_evidence": None,
+                },
+                mixed_outputs,
+            )
+
+        prompt = str(captured["user_prompt"])
+        self.assertIn("Serp Title", prompt)
+        self.assertIn("https://serp.example/a", prompt)
+        self.assertNotIn("tavily_mcp_search", prompt)
+        self.assertNotIn("context7_mcp_query", prompt)
+        self.assertNotIn("CONTEXT7_SECRET_DOCS", prompt)
+        self.assertNotIn("Tavily Only", prompt)
+        self.assertNotIn("should not appear", prompt)
+
+    def test_summarize_skips_llm_when_no_serp_results(self) -> None:
+        """无 SerpAPI 结果时跳过汇总 LLM。"""
+
+        with patch.object(
+            web_search_subagent,
+            "build_chat_model",
+        ) as mock_build:
+            result = web_search_subagent._summarize_web_tool_outputs(
+                {
+                    "task_id": "T1",
+                    "question_id": "Q1",
+                    "query": "test",
+                    "source_type": "blog",
+                    "question": "test question",
+                    "expected_evidence": None,
+                },
+                [
+                    {
+                        "tool_name": "tavily_mcp_search",
+                        "ok": True,
+                        "output": {"results": [{"title": "T", "url": "https://t.example"}]},
+                    }
+                ],
+            )
+
+        mock_build.assert_not_called()
+        self.assertEqual(result["results"], [])
+        self.assertIn("跳过汇总 LLM", result["fetch_reason"])
 
     def test_materialize_tavily_keeps_score_without_summarize(self) -> None:
         """Tavily 结果应保留 score 并由代码物化，不依赖 summarize。"""
@@ -288,6 +413,89 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(candidates[0]["url"], "https://tavily.example/doc")
         self.assertEqual(candidates[0]["snippet"], "答案相关摘要")
         self.assertEqual(candidates[0]["source_name"], "tavily")
+
+    def test_materialize_handles_python_repr_and_nested_raw_result(self) -> None:
+        """兼容旧版 str(dict) raw_result，以及 Playwright 嵌套 snapshot。"""
+
+        tavily_payload = {
+            "results": [
+                {
+                    "title": "Tavily Nested",
+                    "url": "https://tavily.example/nested",
+                    "content": "nested content",
+                    "score": 0.8,
+                }
+            ]
+        }
+        context7_payload = {
+            "library_id": "/demo/lib",
+            "resolve_result": "resolved lib",
+            "docs_result": "official nested docs",
+        }
+        tool_outputs = [
+            {
+                "tool_name": "tavily_mcp_search",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "tavily_mcp",
+                    # 旧路径：str(dict) 不是合法 JSON
+                    "raw_result": str(tavily_payload),
+                },
+            },
+            {
+                "tool_name": "context7_mcp_query",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "context7_mcp",
+                    "raw_result": str(context7_payload),
+                },
+            },
+            {
+                "tool_name": "playwright_mcp_fetch_page",
+                "ok": True,
+                "error": None,
+                "input": {"url": "https://example.com/docs"},
+                "output": {
+                    "provider": "playwright_mcp",
+                    "raw_result": {
+                        "navigation_result": "navigated",
+                        "snapshot_result": "完整 Playwright 页面正文，应被物化为 body。",
+                    },
+                },
+            },
+        ]
+
+        tavily = web_search_subagent._materialize_tavily_results_from_tool_outputs(
+            tool_outputs
+        )
+        context7 = web_search_subagent._materialize_context7_results_from_tool_outputs(
+            tool_outputs
+        )
+        playwright = web_search_subagent._materialize_query_url_playwright_results(
+            tool_outputs
+        )
+
+        self.assertEqual(len(tavily), 1)
+        self.assertEqual(tavily[0]["url"], "https://tavily.example/nested")
+        self.assertEqual(len(context7), 1)
+        self.assertEqual(context7[0]["docs_result"], "official nested docs")
+        self.assertEqual(len(playwright), 1)
+        self.assertIn("Playwright 页面正文", playwright[0]["body"])
+
+        merged = web_search_subagent._merge_all_web_tool_results_by_code(
+            tool_outputs,
+            {
+                "results": [],
+                "web_hitl_required": False,
+                "hitl_reason": None,
+            },
+        )
+        self.assertEqual(merged["code_merge"]["input_counts"]["tavily"], 1)
+        self.assertEqual(merged["code_merge"]["input_counts"]["context7"], 1)
+        self.assertEqual(merged["code_merge"]["input_counts"]["playwright"], 1)
+        self.assertGreaterEqual(merged["code_merge"]["merged_count"], 3)
 
     def test_materialize_context7_without_summarize(self) -> None:
         """Context7 应保留 docs_result/resolve_result，不进 summarize。"""
@@ -558,6 +766,33 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(serp_item["title"], "Page Title")
         self.assertEqual(serp_item["snippet"], "original snippet")
         self.assertEqual(serp_item["body"], "完整页面正文内容")
+        self.assertEqual(updated_result["page_fetch"]["attempted"], True)
+        self.assertEqual(updated_result["page_fetch"]["body_appended"], True)
+        self.assertGreater(updated_result["page_fetch"]["body_chars"], 0)
+
+    def test_enrich_body_matches_normalized_url_or_path(self) -> None:
+        """仅有 url_or_path 且尾斜杠不同时，仍应写入 body。"""
+
+        result = {
+            "results": [
+                {
+                    "title": "Serp",
+                    "url_or_path": "https://example.com/high/",
+                    "snippet": "snippet",
+                    "source_name": "serpapi",
+                }
+            ]
+        }
+        enriched = web_search_subagent._enrich_result_with_page_body(
+            result,
+            fetch_url="https://example.com/high",
+            page_output={
+                "ok": True,
+                "output": {"title": "Page", "content": "正文内容"},
+            },
+        )
+        self.assertEqual(enriched["results"][0]["body"], "正文内容")
+        self.assertEqual(enriched["results"][0]["snippet"], "snippet")
 
     def test_merge_dedupes_same_url_preferring_body(self) -> None:
         """合并时同 URL 去重，优先保留含 body 的候选。"""
@@ -597,6 +832,63 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(len(merged["results"]), 1)
         self.assertEqual(merged["results"][0]["source_name"], "tavily")
         self.assertEqual(merged["results"][0]["body"], "full body text")
+
+    def test_merge_all_web_tool_results_by_code_emits_summary(self) -> None:
+        """代码汇总应合并各来源并写入 code_merge 观测字段。"""
+
+        tool_outputs = [
+            {
+                "tool_name": "tavily_mcp_search",
+                "ok": True,
+                "error": None,
+                "output": {
+                    "provider": "tavily_mcp",
+                    "raw_result": json.dumps(
+                        {
+                            "results": [
+                                {
+                                    "title": "Tavily Doc",
+                                    "url": "https://tavily.example/doc",
+                                    "content": "tavily snippet",
+                                    "score": 0.88,
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            },
+            {
+                "tool_name": "serp_api_search",
+                "ok": True,
+                "error": None,
+                "output": {"results": []},
+            },
+        ]
+        serp_result = {
+            "results": [
+                {
+                    "title": "Serp",
+                    "url_or_path": "https://serp.example/a",
+                    "snippet": "serp",
+                    "source_name": "serpapi",
+                    "score": 0.7,
+                }
+            ],
+            "web_hitl_required": False,
+            "hitl_reason": None,
+        }
+        merged = web_search_subagent._merge_all_web_tool_results_by_code(
+            tool_outputs,
+            serp_result,
+        )
+        self.assertEqual(len(merged["results"]), 2)
+        self.assertIn("tool_evaluation_records", merged)
+        self.assertEqual(merged["code_merge"]["input_counts"]["tavily"], 1)
+        self.assertEqual(merged["code_merge"]["input_counts"]["serpapi"], 1)
+        self.assertEqual(merged["code_merge"]["merged_count"], 2)
+        self.assertEqual(merged["code_merge"]["source_counts"]["tavily"], 1)
+        self.assertEqual(merged["code_merge"]["source_counts"]["serpapi"], 1)
 
     def test_dispatch_does_not_call_external_worker_in_web_search(self) -> None:
         """Web Search 工具池不包含 Claude 或 Codex。"""
@@ -686,6 +978,189 @@ class WebSearchToolConcurrencyLimitTest(unittest.TestCase):
 
         self.assertEqual(max_counts["playwright_mcp_fetch_page"], 1)
         self.assertEqual(max_counts["tavily_mcp_search"], 1)
+
+
+class WebSearchSummarizeFallbackTest(unittest.TestCase):
+    """验证汇总 LLM 畸形输出时的降级与字段归一化。"""
+
+    def test_coerce_maps_url_to_url_or_path(self) -> None:
+        """LLM 返回 url 时应映射为 url_or_path。"""
+
+        coerced = web_search_subagent._coerce_web_summarize_dict(
+            {
+                "results": [
+                    {
+                        "source_name": "serpapi",
+                        "title": "LangSmith Pricing",
+                        "url": "https://www.langchain.com/pricing",
+                        "snippet": "Plans",
+                        "published_at": None,
+                        "relevance_score": 1.0,
+                        "answer_coverage_score": 0.5,
+                        "source_confidence_score": 1.0,
+                        "freshness_score": 0.5,
+                        "score_reason": "官方定价页",
+                    }
+                ],
+                "needs_page_fetch": True,
+                "fetch_url": "https://www.langchain.com/pricing",
+                "fetch_reason": "抓正文",
+            }
+        )
+        from src.llm.structured_outputs import WebSearchSubAgentResultOutput
+
+        parsed = WebSearchSubAgentResultOutput.model_validate(coerced)
+        self.assertEqual(
+            parsed.results[0].url_or_path,
+            "https://www.langchain.com/pricing",
+        )
+
+    def test_summarize_uses_json_object_response_format(self) -> None:
+        """汇总调用应绑定 json_object，再自行归一化。"""
+
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            content = {
+                "results": [],
+                "needs_page_fetch": False,
+                "fetch_url": None,
+                "fetch_reason": "无候选",
+            }
+
+        class FakeModel:
+            def bind(self, **kwargs):  # noqa: ANN003
+                captured["bind"] = kwargs
+                return self
+
+            def invoke(self, messages):  # noqa: ANN001
+                return FakeResponse()
+
+        with patch.object(
+            web_search_subagent,
+            "build_chat_model",
+            return_value=FakeModel(),
+        ):
+            result = web_search_subagent._summarize_web_tool_outputs(
+                {
+                    "task_id": "T1",
+                    "question_id": "Q1",
+                    "query": "test",
+                    "source_type": "blog",
+                    "question": "test question",
+                    "expected_evidence": None,
+                },
+                [
+                    {
+                        "tool_name": "serp_api_search",
+                        "ok": True,
+                        "output": {
+                            "results": [
+                                {
+                                    "title": "T",
+                                    "url": "https://example.com/t",
+                                    "snippet": "S",
+                                    "published_at": None,
+                                }
+                            ]
+                        },
+                    }
+                ],
+            )
+
+        self.assertEqual(
+            captured["bind"],
+            {"response_format": {"type": "json_object"}},
+        )
+        self.assertEqual(result["results"], [])
+        self.assertFalse(result["needs_page_fetch"])
+
+    def test_tool_falls_back_when_summarize_returns_non_object(self) -> None:
+        """汇总校验失败时应回退到 SerpAPI 首条，而不是让节点崩溃。"""
+
+        from pydantic import ValidationError
+
+        tool_outputs = [
+            {
+                "tool_name": "serp_api_search",
+                "ok": True,
+                "output": {
+                    "results": [
+                        {
+                            "title": "Fallback Title",
+                            "url": "https://example.com/fallback",
+                            "snippet": "fallback snippet",
+                            "published_at": None,
+                        }
+                    ]
+                },
+            }
+        ]
+
+        def boom(*_args, **_kwargs):
+            raise ValidationError.from_exception_data(
+                "WebSearchSubAgentResultOutput",
+                [
+                    {
+                        "type": "model_type",
+                        "loc": (),
+                        "input": [1],
+                        "ctx": {"class_name": "WebSearchSubAgentResultOutput"},
+                    }
+                ],
+            )
+
+        with (
+            patch.object(
+                web_search_subagent,
+                "_collect_web_tool_outputs",
+                return_value=tool_outputs,
+            ),
+            patch.object(
+                web_search_subagent,
+                "_summarize_web_tool_outputs",
+                side_effect=boom,
+            ),
+            patch.object(
+                web_search_subagent,
+                "_materialize_tavily_results_from_tool_outputs",
+                return_value=[],
+            ),
+            patch.object(
+                web_search_subagent,
+                "_materialize_context7_results_from_tool_outputs",
+                return_value=[],
+            ),
+            patch.object(
+                web_search_subagent,
+                "_materialize_query_url_playwright_results",
+                return_value=[],
+            ),
+        ):
+            raw = web_search_subagent.web_search_subagent_tool.invoke(
+                {
+                    "task_json": json.dumps(
+                        {
+                            "task": {
+                                "task_id": "T1",
+                                "question_id": "Q1",
+                                "query": "test",
+                                "source_type": "blog",
+                            }
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            )
+
+        payload = json.loads(raw)
+        self.assertIn("summarize_error", payload)
+        self.assertIn("Input should be a valid dictionary", payload["summarize_error"])
+        self.assertEqual(payload["results"][0]["title"], "Fallback Title")
+        self.assertEqual(
+            payload["results"][0]["url_or_path"],
+            "https://example.com/fallback",
+        )
 
 
 if __name__ == "__main__":

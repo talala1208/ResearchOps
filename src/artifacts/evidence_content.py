@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config.settings import get_project_root
+from src.artifacts.tool_content_cleanup import normalize_whitespace
 
 
 EVIDENCE_CONTENT_DIRNAME = "evidence"
@@ -59,10 +60,13 @@ def load_evidence_content(content_path: str | None) -> str:
 
 
 def extract_candidate_long_text(candidate: dict[str, Any]) -> str:
-    """从候选中提取应落盘的长文：body > docs_result > resolve_result。"""
+    """从候选中提取应落盘的长文：body > docs_result > resolve_result。
+
+    提取后做轻量空白规范化；来源侧应已完成针对性清洗。
+    """
 
     for key in ("body", "docs_result", "resolve_result"):
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return normalize_whitespace(value)
     return ""

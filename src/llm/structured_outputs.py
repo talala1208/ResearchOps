@@ -81,7 +81,7 @@ class SearchTaskOutput(BaseModel):
     query: str
     source_type: SourceType
     search_provider: str
-    attempt: int = Field(ge=1)
+    attempt: int = Field(default=1, ge=1, description="检索轮次，首轮应为 1")
 
 
 class SearchTaskPlanOutput(BaseModel):
@@ -132,7 +132,12 @@ class WebSearchResultOutput(BaseModel):
 class WebSearchSubAgentResultOutput(BaseModel):
     """Web Search SubAgent 标准输出。"""
 
-    results: list[WebSearchResultOutput]
+    results: list[WebSearchResultOutput] = Field(
+        description=(
+            "SerpAPI 候选结果对象列表；每项必须是对象，"
+            "禁止返回索引数字数组（例如 [1] 或 [0, 2]）。"
+        ),
+    )
     needs_page_fetch: bool = Field(
         description=(
             "是否需要抓取一条 Serp 结果页正文；"

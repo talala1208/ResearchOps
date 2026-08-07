@@ -118,24 +118,52 @@ class ToolReturnsTest(unittest.TestCase):
         self.assertEqual(payload["provider"], "tavily_mcp")
 
     def test_context7_mcp_query_returns_json(self) -> None:
-        """Context7 MCP 工具返回 JSON。"""
+        """Context7 MCP 工具返回 JSON，且 raw_result 可再解析。"""
 
-        self._mock_online_mcp_success("context7 result")
+        self._mock_online_mcp_success(
+            {
+                "library_id": "/demo/lib",
+                "resolve_result": "resolved",
+                "docs_result": "docs body",
+            }
+        )
         result = online_mcp_tools.context7_mcp_query.invoke("LangChain")
 
         payload = json.loads(result)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["provider"], "context7_mcp")
+        self.assertEqual(payload["library_id"], "/demo/lib")
+        self.assertEqual(payload["docs_result"], "docs body")
+        self.assertIsInstance(payload["raw_result"], dict)
+        self.assertEqual(payload["raw_result"]["docs_result"], "docs body")
 
     def test_playwright_mcp_fetch_page_returns_json(self) -> None:
-        """Playwright MCP 页面读取工具返回 JSON。"""
+        """Playwright MCP 页面读取工具返回 JSON，正文可从顶层读取。"""
 
-        self._mock_online_mcp_success({"snapshot_result": "page text"})
+        self._mock_online_mcp_success(
+            {
+                "navigation_result": "ok",
+                "snapshot_result": "page text",
+            }
+        )
         result = online_mcp_tools.playwright_mcp_fetch_page.invoke("https://example.com")
 
         payload = json.loads(result)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["provider"], "playwright_mcp")
+        self.assertEqual(payload["snapshot_result"], "page text")
+        self.assertEqual(payload["raw_result"]["snapshot_result"], "page text")
+
+    def test_tavily_mcp_search_raw_result_is_json_ready(self) -> None:
+        """Tavily raw_result 不得是 Python dict 的 str()。"""
+
+        self._mock_online_mcp_success(
+            {"results": [{"title": "T", "url": "https://t.example", "content": "c"}]}
+        )
+        result = online_mcp_tools.tavily_mcp_search.invoke("Cursor docs")
+        payload = json.loads(result)
+        self.assertIsInstance(payload["raw_result"], dict)
+        self.assertEqual(payload["raw_result"]["results"][0]["url"], "https://t.example")
 
     def test_devtools_mcp_inspect_page_returns_json(self) -> None:
         """Chrome DevTools MCP 页面观察工具返回 JSON。"""

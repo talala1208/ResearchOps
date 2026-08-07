@@ -39,6 +39,25 @@ class MCPToolError(RuntimeError):
     """MCP 工具调用错误。"""
 
 
+def _json_ready(value: Any) -> Any:
+    """把 MCP 返回值转成可 JSON 序列化结构，禁止用 str(dict) 产生非法 JSON。"""
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    # MCP / adapter 偶发返回带 model_dump 的对象
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_ready(model_dump())
+        except Exception:  # noqa: BLE001 - 回退到文本
+            pass
+    return str(value)
+
+
 def _read_optional_env(name: str) -> str | None:
     """读取 MCP 可选环境变量。"""
 
@@ -263,8 +282,8 @@ async def _context7_query_async(topic: str) -> Any:
     )
     return {
         "library_id": library_id,
-        "resolve_result": str(resolve_result),
-        "docs_result": str(docs_result),
+        "resolve_result": _json_ready(resolve_result),
+        "docs_result": _json_ready(docs_result),
     }
 
 
@@ -299,8 +318,8 @@ async def _playwright_fetch_page_async(url: str) -> Any:
             ],
         )
     return {
-        "navigation_result": str(navigation_result),
-        "snapshot_result": str(snapshot_result),
+        "navigation_result": _json_ready(navigation_result),
+        "snapshot_result": _json_ready(snapshot_result),
     }
 
 
@@ -334,8 +353,8 @@ async def _devtools_inspect_page_async(url: str) -> Any:
         ],
     )
     return {
-        "navigation_result": str(navigation_result),
-        "inspect_result": str(inspect_result),
+        "navigation_result": _json_ready(navigation_result),
+        "inspect_result": _json_ready(inspect_result),
     }
 
 
@@ -375,7 +394,7 @@ def tavily_mcp_search(query: str, max_results: int = 5) -> str:
         {
             "ok": True,
             "provider": "tavily_mcp",
-            "raw_result": str(result),
+            "raw_result": _json_ready(result),
         },
         ensure_ascii=False,
     )
@@ -402,14 +421,17 @@ def context7_mcp_query(topic: str) -> str:
             },
             ensure_ascii=False,
         )
-    return json.dumps(
-        {
-            "ok": True,
-            "provider": "context7_mcp",
-            "raw_result": str(result),
-        },
-        ensure_ascii=False,
-    )
+    payload = {
+        "ok": True,
+        "provider": "context7_mcp",
+        "raw_result": _json_ready(result),
+    }
+    if isinstance(result, dict):
+        # 顶层同步暴露，便于物化层不依赖 raw_result 解包
+        for key in ("library_id", "resolve_result", "docs_result", "docs"):
+            if key in result:
+                payload[key] = _json_ready(result[key])
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @tool
@@ -433,14 +455,28 @@ def playwright_mcp_fetch_page(url: str) -> str:
             },
             ensure_ascii=False,
         )
-    return json.dumps(
-        {
-            "ok": True,
-            "provider": "playwright_mcp",
-            "raw_result": result,
-        },
-        ensure_ascii=False,
-    )
+    ready = _json_ready(result)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "provider": "playwright_mcp",
+        "raw_result": ready,
+    }
+    if isinstance(ready, dict):
+        for key in (
+            "title",
+            "page_title",
+            "url",
+            "content",
+            "text",
+            "snapshot",
+            "page_text",
+            "snapshot_result",
+            "navigation_result",
+            "raw_text",
+        ):
+            if key in ready:
+                payload[key] = ready[key]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @tool
@@ -468,7 +504,7 @@ def devtools_mcp_inspect_page(url: str) -> str:
         {
             "ok": True,
             "provider": "devtools_mcp",
-            "raw_result": result,
+            "raw_result": _json_ready(result),
         },
         ensure_ascii=False,
     )

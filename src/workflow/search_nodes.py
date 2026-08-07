@@ -9,6 +9,7 @@ from typing import Any
 
 from langsmith.utils import ContextThreadPoolExecutor
 
+from src.artifacts.tool_content_cleanup import compact_devtools_observation
 from src.schemas.state import ResearchState
 from src.tools.local_document_search import query_local_documents_for_task
 from src.tools.structured_data import query_structured_products_for_task
@@ -55,7 +56,26 @@ def _inspect_login_page_with_devtools(url: str) -> dict[str, Any]:
             "reason": "ENABLE_HITL_DEVTOOLS=false，跳过 DevTools 登录界面确认。",
         }
     raw_result = devtools_mcp_inspect_page.invoke({"url": url})
-    return json.loads(raw_result)
+    try:
+        payload = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return compact_devtools_observation(
+            {
+                "ok": False,
+                "provider": "devtools_mcp",
+                "error": "DevTools 返回非 JSON",
+                "raw_result": raw_result,
+            }
+        )
+    if not isinstance(payload, dict):
+        return compact_devtools_observation(
+            {
+                "ok": False,
+                "provider": "devtools_mcp",
+                "error": "DevTools 返回非对象",
+            }
+        )
+    return compact_devtools_observation(payload)
 
 
 def _tasks_by_source_type(state: ResearchState, source_types: set[str]) -> list[dict[str, Any]]:

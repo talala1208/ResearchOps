@@ -17,12 +17,20 @@ import json
 import os
 import re
 import threading
+from ast import literal_eval
 from typing import Any
 
 from langchain.tools import tool
 from langsmith import traceable
 from serpapi import GoogleSearch
 
+from src.artifacts.tool_content_cleanup import (
+    clean_context7_docs,
+    clean_context7_resolve,
+    clean_playwright_body,
+    clean_tavily_snippet,
+    unwrap_text_content,
+)
 from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import WebSearchSubAgentResultOutput
@@ -516,13 +524,17 @@ def _enrich_result_with_page_body(
         return result
 
     page_title = compact.get("title")
+    target_url = _normalize_candidate_url(fetch_url)
     updated_results: list[Any] = []
+    appended = False
     for item in result.get("results", []):
         if not isinstance(item, dict):
             updated_results.append(item)
             continue
-        item_url = item.get("url") or item.get("url_or_path")
-        if item_url != fetch_url:
+        item_url = _normalize_candidate_url(
+            item.get("url") or item.get("url_or_path")
+        )
+        if item_url is None or item_url != target_url:
             updated_results.append(item)
             continue
         enriched = dict(item)
@@ -530,11 +542,15 @@ def _enrich_result_with_page_body(
             enriched["title"] = page_title.strip()
         enriched["body"] = body
         updated_results.append(enriched)
+        appended = True
 
+    if not appended:
+        return result
     return {
         **result,
         "results": updated_results,
     }
+
 
 @traceable(name="collect_web_tool_outputs", run_type="chain")
 def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
@@ -741,15 +757,29 @@ def _finalize_playwright_only_hitl(
     }
 
 
+@traceable(name="fetch_serpapi_page_and_enrich_body", run_type="chain")
 def _maybe_fetch_serpapi_page_and_enrich(
     tool_outputs: list[dict[str, Any]],
     result: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """按 LLM 抓正文决策（硬分否决/兜底）抓取 SerpAPI 正文，写入 body。"""
+    """按 LLM 抓正文决策（硬分否决/兜底）抓取 SerpAPI 正文，写入 body。
+
+    该步骤单独成 LangSmith span，便于观测：是否抓取、抓取 URL、是否成功写入 body。
+    """
 
     fetch_url = _resolve_serpapi_fetch_url(result)
     if fetch_url is None:
-        return tool_outputs, result
+        return tool_outputs, {
+            **result,
+            "page_fetch": {
+                "attempted": False,
+                "fetch_url": None,
+                "ok": None,
+                "body_appended": False,
+                "body_chars": 0,
+                "reason": result.get("fetch_reason") or "未触发 Serp 结果页抓取",
+            },
+        }
 
     page_output = _call_tool(
         "playwright_mcp_fetch_serpapi_result_page_1",
@@ -764,15 +794,38 @@ def _maybe_fetch_serpapi_page_and_enrich(
             url=fetch_url,
             reason=login_reason,
         )
+        marked["page_fetch"] = {
+            "attempted": True,
+            "fetch_url": fetch_url,
+            "ok": bool(page_output.get("ok")),
+            "body_appended": False,
+            "body_chars": 0,
+            "reason": login_reason,
+            "tool_name": page_output.get("tool_name"),
+        }
         return updated_outputs, marked
     if not page_output.get("ok"):
-        return updated_outputs, result
+        failed = {
+            **result,
+            "page_fetch": {
+                "attempted": True,
+                "fetch_url": fetch_url,
+                "ok": False,
+                "body_appended": False,
+                "body_chars": 0,
+                "reason": page_output.get("error") or "Playwright 抓取失败",
+                "tool_name": page_output.get("tool_name"),
+            },
+        }
+        return updated_outputs, failed
 
     enriched = _enrich_result_with_page_body(
         result,
         fetch_url=fetch_url,
         page_output=page_output,
     )
+    body_chars = 0
+    body_appended = False
     body_login = None
     for item in enriched.get("results", []):
         if not isinstance(item, dict):
@@ -781,8 +834,12 @@ def _maybe_fetch_serpapi_page_and_enrich(
             item.get("url") or item.get("url_or_path")
         ) != _normalize_candidate_url(fetch_url):
             continue
+        body = item.get("body")
+        if isinstance(body, str) and body.strip():
+            body_chars = len(body)
+            body_appended = True
         body_login = _playwright_login_signal(
-            {"error": None, "output": {"content": item.get("body")}}
+            {"error": None, "output": {"content": body}}
         )
         break
     if body_login is not None:
@@ -791,6 +848,30 @@ def _maybe_fetch_serpapi_page_and_enrich(
             url=fetch_url,
             reason=body_login,
         )
+        enriched["page_fetch"] = {
+            "attempted": True,
+            "fetch_url": fetch_url,
+            "ok": True,
+            "body_appended": body_appended,
+            "body_chars": body_chars,
+            "reason": body_login,
+            "tool_name": page_output.get("tool_name"),
+        }
+        return updated_outputs, enriched
+
+    enriched["page_fetch"] = {
+        "attempted": True,
+        "fetch_url": fetch_url,
+        "ok": True,
+        "body_appended": body_appended,
+        "body_chars": body_chars,
+        "reason": (
+            "已写入 body"
+            if body_appended
+            else "抓取成功但未匹配到候选 URL，body 未追加"
+        ),
+        "tool_name": page_output.get("tool_name"),
+    }
     return updated_outputs, enriched
 
 
@@ -823,29 +904,57 @@ def _compact_search_result_item(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _coerce_structured_value(value: Any) -> Any:
+    """解析工具里常见的结构化包装：dict/list、JSON 字符串、Python repr、text blocks。"""
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        if value and all(
+            isinstance(item, dict)
+            and (
+                item.get("type") == "text"
+                or isinstance(item.get("text"), str)
+            )
+            for item in value
+        ):
+            unwrapped = unwrap_text_content(value).strip()
+            if unwrapped:
+                return _coerce_structured_value(unwrapped)
+        return value
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    if text[0] in "{[" and text[-1] in "}]":
+        try:
+            return literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError):
+            pass
+    return value
+
+
 def _extract_tavily_result_items(output: Any) -> list[Any]:
     """尽量从 Tavily 原始输出提取结果列表。"""
 
-    if isinstance(output, list):
-        return output
-    if not isinstance(output, dict):
+    coerced = _coerce_structured_value(output)
+    if isinstance(coerced, list):
+        return [item for item in coerced if isinstance(item, dict)]
+    if not isinstance(coerced, dict):
         return []
     for key in ("results", "organic_results", "data"):
-        value = output.get(key)
+        value = _coerce_structured_value(coerced.get(key))
         if isinstance(value, list):
-            return value
-    raw_result = output.get("raw_result")
-    if isinstance(raw_result, str):
-        try:
-            parsed = json.loads(raw_result)
-        except json.JSONDecodeError:
-            return []
-        return _extract_tavily_result_items(parsed)
-    if isinstance(raw_result, dict):
-        return _extract_tavily_result_items(raw_result)
-    if isinstance(raw_result, list):
-        return raw_result
-    return []
+            return [item for item in value if isinstance(item, dict)]
+    raw_result = coerced.get("raw_result")
+    if raw_result is None:
+        return []
+    return _extract_tavily_result_items(raw_result)
 
 
 def _materialize_tavily_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -853,14 +962,19 @@ def _materialize_tavily_candidate(item: dict[str, Any]) -> dict[str, Any] | None
 
     url = item.get("url") or item.get("link") or item.get("url_or_path")
     title = item.get("title")
-    snippet = item.get("content") or item.get("snippet") or item.get("description")
+    if isinstance(title, str):
+        title = title.strip()
+    else:
+        title = ""
+    snippet = clean_tavily_snippet(
+        item.get("content") or item.get("snippet") or item.get("description"),
+        max_chars=2000,
+    )
     if not (
-        isinstance(title, str)
-        and title.strip()
+        title
         and isinstance(url, str)
         and url.startswith(("http://", "https://"))
-        and isinstance(snippet, str)
-        and snippet.strip()
+        and snippet
     ):
         return None
 
@@ -874,11 +988,11 @@ def _materialize_tavily_candidate(item: dict[str, Any]) -> dict[str, Any] | None
         else DEFAULT_TAVILY_FRESHNESS_WITHOUT_DATE
     )
     return {
-        "title": title.strip(),
+        "title": title,
         "score": score,
         "url": url,
         "url_or_path": url,
-        "snippet": snippet.strip(),
+        "snippet": snippet,
         "published_at": published_at,
         "source_name": "tavily",
         "requires_login": False,
@@ -894,6 +1008,7 @@ def _materialize_tavily_candidate(item: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+@traceable(name="materialize_tavily_candidates", run_type="chain")
 def _materialize_tavily_results_from_tool_outputs(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -915,55 +1030,75 @@ def _materialize_tavily_results_from_tool_outputs(
 
 
 def _parse_context7_payload(output: Any) -> dict[str, Any]:
-    """解析 Context7 工具输出中的 docs/resolve 字段。"""
+    """解析 Context7 工具输出中的 docs/resolve 字段。
+
+    docs_result 不回退到整个 raw_result，避免把 library 列表 dict 当成正文。
+    """
 
     output_dict = _tool_output_as_dict(output)
-    raw_result = output_dict.get("raw_result")
+    raw_result = _coerce_structured_value(output_dict.get("raw_result"))
     parsed: dict[str, Any] = {}
-    if isinstance(raw_result, str):
-        try:
-            maybe = json.loads(raw_result)
-        except json.JSONDecodeError:
-            maybe = None
-        if isinstance(maybe, dict):
-            parsed = maybe
-    elif isinstance(raw_result, dict):
+    if isinstance(raw_result, dict):
         parsed = raw_result
     if not parsed:
-        parsed = output_dict
+        parsed = {
+            key: output_dict.get(key)
+            for key in ("library_id", "resolve_result", "docs_result", "docs")
+            if key in output_dict
+        }
+
+    docs_raw = (
+        parsed.get("docs_result")
+        or output_dict.get("docs_result")
+        or parsed.get("docs")
+        or output_dict.get("docs")
+    )
+    # 仅当 raw_result 本身就是文档字符串/可解包正文时才作为 docs 回退
+    if docs_raw is None and raw_result is not None and not isinstance(raw_result, dict):
+        if isinstance(raw_result, str):
+            stripped = raw_result.strip()
+            if stripped and not stripped.startswith("{") and not stripped.startswith("["):
+                docs_raw = raw_result
+        else:
+            # 例如 text blocks 列表
+            unwrapped = unwrap_text_content(raw_result).strip()
+            if unwrapped:
+                docs_raw = raw_result
+
     return {
         "library_id": parsed.get("library_id") or output_dict.get("library_id"),
         "resolve_result": parsed.get("resolve_result") or output_dict.get("resolve_result"),
-        "docs_result": (
-            parsed.get("docs_result")
-            or output_dict.get("docs_result")
-            or parsed.get("docs")
-            or output_dict.get("docs")
-            or raw_result
-        ),
+        "docs_result": docs_raw,
     }
 
 
+@traceable(name="materialize_context7_candidates", run_type="chain")
 def _materialize_context7_results_from_tool_outputs(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Context7 官方文档不打分，直接保留 docs_result / resolve_result。"""
+    """Context7 官方文档不打分；清洗后保留 docs_result / resolve_result。"""
 
     candidates: list[dict[str, Any]] = []
+    max_docs = _context7_max_chars()
+    max_resolve = max(500, max_docs // 4)
     for tool_output in tool_outputs:
         if tool_output.get("tool_name") != "context7_mcp_query":
             continue
         if not tool_output.get("ok"):
             continue
         payload = _parse_context7_payload(tool_output.get("output"))
-        docs_result = _truncate_text(payload.get("docs_result"), _context7_max_chars())
-        resolve_result = _truncate_text(
+        docs_result = clean_context7_docs(payload.get("docs_result"), max_chars=max_docs)
+        resolve_result = clean_context7_resolve(
             payload.get("resolve_result"),
-            max(500, _context7_max_chars() // 4),
+            max_chars=max_resolve,
         )
         if not docs_result and not resolve_result:
             continue
         library_id = payload.get("library_id") or "context7"
+        if not isinstance(library_id, str) or not library_id.strip():
+            library_id = "context7"
+        else:
+            library_id = library_id.strip()
         candidates.append(
             {
                 "title": f"Context7 {library_id}",
@@ -989,6 +1124,7 @@ def _materialize_context7_results_from_tool_outputs(
     return candidates
 
 
+@traceable(name="materialize_query_url_playwright_body", run_type="chain")
 def _materialize_query_url_playwright_results(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1153,6 +1289,72 @@ def _merge_code_materialized_candidates(
     }
 
 
+def _count_results_by_source(results: list[Any]) -> dict[str, int]:
+    """按 source_name 统计合并后的候选数。"""
+
+    counts: dict[str, int] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source_name") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+@traceable(name="merge_all_web_tool_results_by_code", run_type="chain")
+def _merge_all_web_tool_results_by_code(
+    tool_outputs: list[dict[str, Any]],
+    serp_result: dict[str, Any],
+) -> dict[str, Any]:
+    """单次任务内：把各工具结果经代码物化、合并去重，并整理 HITL / 评测记录。
+
+    该步骤独立成 LangSmith span，覆盖 Tavily / Context7 / Playwright / SerpAPI
+    的代码侧汇总，不经过汇总 LLM。
+    """
+
+    tavily_candidates = _materialize_tavily_results_from_tool_outputs(tool_outputs)
+    context7_candidates = _materialize_context7_results_from_tool_outputs(tool_outputs)
+    playwright_candidates = _materialize_query_url_playwright_results(tool_outputs)
+    merged = _merge_code_materialized_candidates(
+        serp_result,
+        tavily_candidates=tavily_candidates,
+        context7_candidates=context7_candidates,
+        playwright_candidates=playwright_candidates,
+    )
+    finalized = _finalize_playwright_only_hitl(tool_outputs, merged)
+    results = finalized.get("results") or []
+    if not isinstance(results, list):
+        results = []
+    body_count = sum(
+        1
+        for item in results
+        if isinstance(item, dict)
+        and isinstance(item.get("body"), str)
+        and item["body"].strip()
+    )
+    finalized["tool_evaluation_records"] = _build_web_tool_evaluation_records(
+        tool_outputs
+    )
+    finalized["code_merge"] = {
+        "input_counts": {
+            "tavily": len(tavily_candidates),
+            "context7": len(context7_candidates),
+            "playwright": len(playwright_candidates),
+            "serpapi": sum(
+                1
+                for item in serp_result.get("results", [])
+                if isinstance(item, dict)
+            ),
+            "tool_outputs": len(tool_outputs),
+        },
+        "merged_count": len(results),
+        "source_counts": _count_results_by_source(results),
+        "with_body_count": body_count,
+        "web_hitl_required": bool(finalized.get("web_hitl_required")),
+    }
+    return finalized
+
+
 def _tool_outputs_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1163,15 +1365,48 @@ def _tool_outputs_for_summarize(
         for item in tool_outputs
         if item.get("tool_name") == "serp_api_search"
     ]
+
+
+def _extract_serpapi_results_for_summarize(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从工具输出中提取并压缩 SerpAPI 结果；Tavily/Context7/Playwright 一律不进入。"""
+
+    serp_results: list[dict[str, Any]] = []
+    for tool_output in _tool_outputs_for_summarize(tool_outputs):
+        if not tool_output.get("ok"):
+            continue
+        output = _tool_output_as_dict(tool_output.get("output"))
+        raw_results = output.get("results") or output.get("organic_results") or []
+        if not isinstance(raw_results, list):
+            continue
+        for item in raw_results:
+            compacted = _compact_search_result_item(item)
+            if compacted is not None:
+                serp_results.append(compacted)
+    return serp_results
+
+
 def _compact_playwright_output(output: Any, *, url: str | None) -> dict[str, Any]:
-    """压缩 Playwright 输出，只保留 url / title / 截断正文。"""
+    """压缩 Playwright 输出，只保留 url / title / 清洗截断后的正文。"""
 
     output_dict = _tool_output_as_dict(output)
+    raw_result = _coerce_structured_value(output_dict.get("raw_result"))
+    if isinstance(raw_result, dict):
+        # online_mcp_tools 把正文放在 raw_result 内；顶层字段优先
+        output_dict = {
+            **raw_result,
+            **{key: value for key, value in output_dict.items() if key != "raw_result"},
+        }
     title = (
         output_dict.get("title")
         or output_dict.get("page_title")
         or output_dict.get("name")
     )
+    if isinstance(title, str):
+        title = title.strip()
+    else:
+        title = None
     candidates = [
         output_dict.get("content"),
         output_dict.get("text"),
@@ -1181,115 +1416,58 @@ def _compact_playwright_output(output: Any, *, url: str | None) -> dict[str, Any
         output_dict.get("raw_text"),
         output_dict.get("navigation_result"),
     ]
+    if isinstance(raw_result, str):
+        candidates.append(raw_result)
     body = ""
     for candidate in candidates:
-        text = _tool_output_text(candidate).strip()
+        text = unwrap_text_content(candidate).strip()
+        if not text:
+            text = _tool_output_text(candidate).strip()
         if len(text) > len(body):
             body = text
     if not body and not isinstance(output, dict):
-        body = _tool_output_text(output).strip()
+        body = unwrap_text_content(output).strip() or _tool_output_text(output).strip()
+    cleaned_body = clean_playwright_body(body, max_chars=_playwright_max_chars())
     return {
         "url": url or output_dict.get("url"),
         "title": title,
-        "content": _truncate_text(body, _playwright_max_chars()),
+        "content": cleaned_body,
     }
-
-
-def _compact_context7_output(output: Any) -> dict[str, Any]:
-    """压缩 Context7 输出，截断文档正文。"""
-
-    max_chars = _context7_max_chars()
-    if isinstance(output, dict):
-        raw_result = output.get("raw_result")
-        if isinstance(raw_result, str):
-            try:
-                parsed = json.loads(raw_result)
-            except json.JSONDecodeError:
-                return {
-                    "provider": output.get("provider"),
-                    "ok": output.get("ok", True),
-                    "docs": _truncate_text(raw_result, max_chars),
-                }
-            if isinstance(parsed, dict):
-                return {
-                    "provider": output.get("provider"),
-                    "ok": output.get("ok", True),
-                    "library_id": parsed.get("library_id"),
-                    "resolve_result": _truncate_text(
-                        parsed.get("resolve_result"),
-                        max(500, max_chars // 4),
-                    ),
-                    "docs_result": _truncate_text(parsed.get("docs_result"), max_chars),
-                }
-        return {
-            "provider": output.get("provider"),
-            "ok": output.get("ok", True),
-            "library_id": output.get("library_id"),
-            "resolve_result": _truncate_text(
-                output.get("resolve_result"),
-                max(500, max_chars // 4),
-            ),
-            "docs_result": _truncate_text(
-                output.get("docs_result") or output.get("raw_result") or output,
-                max_chars,
-            ),
-        }
-    return {"docs": _truncate_text(output, max_chars)}
-
-
-def _compact_tool_output_for_summarize(tool_output: dict[str, Any]) -> dict[str, Any]:
-    """压缩单条工具输出，降低汇总 LLM 输入体积。"""
-
-    tool_name = str(tool_output.get("tool_name") or "")
-    compact: dict[str, Any] = {
-        "tool_name": tool_name,
-        "ok": bool(tool_output.get("ok")),
-        "error": tool_output.get("error"),
-    }
-    output = tool_output.get("output")
-
-    if tool_name == "serp_api_search":
-        output_dict = _tool_output_as_dict(output)
-        results = output_dict.get("results") or output_dict.get("organic_results") or []
-        compact_results = []
-        if isinstance(results, list):
-            for item in results:
-                compacted = _compact_search_result_item(item)
-                if compacted is not None:
-                    compact_results.append(compacted)
-        compact["output"] = {
-            "provider": output_dict.get("provider", "serpapi"),
-            "results": compact_results,
-        }
-        return compact
-
-    if tool_name == "context7_mcp_query":
-        compact["output"] = _compact_context7_output(output)
-        return compact
-
-    if tool_name.startswith("playwright_mcp_fetch"):
-        input_payload = tool_output.get("input")
-        url = None
-        if isinstance(input_payload, dict):
-            maybe_url = input_payload.get("url")
-            if isinstance(maybe_url, str):
-                url = maybe_url
-        compact["output"] = _compact_playwright_output(output, url=url)
-        return compact
-
-    compact["output"] = _truncate_text(output, _context7_max_chars())
-    return compact
 
 
 def _compact_tool_outputs_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """压缩非 Tavily 工具输出后再交给汇总 LLM。"""
+    """兼容旧调用：返回仅含 SerpAPI 的压缩结构。
+
+    新路径请优先使用 `_extract_serpapi_results_for_summarize`。
+    """
 
     return [
-        _compact_tool_output_for_summarize(item)
-        for item in _tool_outputs_for_summarize(tool_outputs)
-    ]
+        {
+            "tool_name": "serp_api_search",
+            "ok": True,
+            "error": None,
+            "output": {
+                "provider": "serpapi",
+                "results": _extract_serpapi_results_for_summarize(tool_outputs),
+            },
+        }
+    ] if _tool_outputs_for_summarize(tool_outputs) else []
+
+
+def _empty_serpapi_summarize_result() -> dict[str, Any]:
+    """无可用 SerpAPI 结果时跳过汇总 LLM。"""
+
+    return {
+        "results": [],
+        "needs_page_fetch": False,
+        "fetch_url": None,
+        "fetch_reason": "无可用 SerpAPI 结果，跳过汇总 LLM。",
+        "web_hitl_required": False,
+        "hitl_reason": None,
+    }
+
 
 def _tool_output_as_dict(value: Any) -> dict[str, Any]:
     """把工具输出转换为便于确定性检查的字典。"""
@@ -1327,7 +1505,7 @@ def _valid_search_result_count(tool_output: dict[str, Any]) -> int:
             and item.get("snippet")
         )
     if tool_name == "tavily_mcp_search":
-        results = output.get("results") or []
+        results = _extract_tavily_result_items(output)
         if not results and len(str(output.get("raw_text") or "").strip()) >= 100:
             return 1
         return sum(
@@ -1509,14 +1687,79 @@ def _has_usable_web_result(result: dict[str, Any]) -> bool:
     return False
 
 
-@traceable(name="summarize_web_tool_outputs", run_type="llm")
+def _parse_llm_json_content(content: Any) -> dict[str, Any]:
+    """从聊天消息 content 解析 JSON 对象，兼容 text blocks。"""
+
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        content = "\n".join(text_parts)
+    if not isinstance(content, str):
+        raise ValueError(f"无法解析 Web 汇总输出类型：{type(content).__name__}")
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("Web 汇总 LLM 输出必须是 JSON 对象")
+    return parsed
+
+
+def _coerce_web_summarize_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    """归一化汇总 LLM 常见字段漂移。"""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Web 汇总 LLM 输出必须是 JSON 对象")
+
+    data = dict(payload)
+    coerced_results: list[dict[str, Any]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        result = dict(item)
+        url_or_path = result.get("url_or_path")
+        if not isinstance(url_or_path, str) or not url_or_path.strip():
+            url = result.get("url")
+            if isinstance(url, str) and url.strip():
+                result["url_or_path"] = url.strip()
+        if not isinstance(result.get("source_name"), str) or not result["source_name"]:
+            result["source_name"] = "serpapi"
+        coerced_results.append(result)
+    data["results"] = coerced_results
+
+    if "needs_page_fetch" not in data:
+        data["needs_page_fetch"] = False
+    if "fetch_url" not in data:
+        data["fetch_url"] = None
+    if "fetch_reason" not in data:
+        data["fetch_reason"] = None
+    return data
+
+
+@traceable(name="summarize_serpapi_results", run_type="llm")
 def _summarize_web_tool_outputs(
     task: dict[str, Any],
     tool_outputs: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """用单次 LLM 调用把工具输出汇总成标准 WebSearchSubAgentResult。"""
+    """仅对 SerpAPI 压缩结果做单次 LLM 打分；Tavily/Context7/Playwright 不进入本函数输入。"""
 
-    compact_outputs = _compact_tool_outputs_for_summarize(tool_outputs)
+    serp_results = _extract_serpapi_results_for_summarize(tool_outputs)
+    if not serp_results:
+        return _empty_serpapi_summarize_result()
+
     prompt = load_prompt("web_search_subagent.yml")
     user_prompt = render_prompt_template(
         prompt["user_prompt_template"],
@@ -1530,19 +1773,26 @@ def _summarize_web_tool_outputs(
             ),
             "query": task["query"],
             "source_type": task["source_type"],
-            "tool_outputs_json": json.dumps(compact_outputs, ensure_ascii=False),
+            "serpapi_results_json": json.dumps(serp_results, ensure_ascii=False),
         },
     )
-    model = build_chat_model("web_search_subagent").with_structured_output(
-        WebSearchSubAgentResultOutput
+    # 硬断言：汇总 prompt 不得混入其他工具输出
+    forbidden = ("tavily_mcp_search", "context7_mcp_query", "playwright_mcp_fetch")
+    if any(marker in user_prompt for marker in forbidden):
+        raise ValueError("汇总 LLM prompt 混入了非 SerpAPI 工具输出")
+
+    model = build_chat_model("web_search_subagent").bind(
+        response_format={"type": "json_object"}
     )
-    result = model.invoke(
+    response = model.invoke(
         [
             ("system", prompt["system_prompt"]),
             ("human", user_prompt),
         ]
     )
-    return result.model_dump()
+    payload = _parse_llm_json_content(getattr(response, "content", response))
+    coerced = _coerce_web_summarize_dict(payload)
+    return WebSearchSubAgentResultOutput.model_validate(coerced).model_dump()
 
 
 @tool("web_search_subagent_tool")
@@ -1552,11 +1802,10 @@ def web_search_subagent_tool(task_json: str) -> str:
     payload = json.loads(task_json)
     task = payload["task"] if "task" in payload else payload
     tool_outputs = _collect_web_tool_outputs(task)
-    tavily_candidates = _materialize_tavily_results_from_tool_outputs(tool_outputs)
-    context7_candidates = _materialize_context7_results_from_tool_outputs(tool_outputs)
-    playwright_candidates = _materialize_query_url_playwright_results(tool_outputs)
     try:
-        result = _summarize_web_tool_outputs(task, tool_outputs)
+        # 明确只把 SerpAPI 相关 tool_outputs 交给汇总；其他来源在代码合并 span 中物化
+        serp_only_outputs = _tool_outputs_for_summarize(tool_outputs)
+        result = _summarize_web_tool_outputs(task, serp_only_outputs)
         result = _attach_serpapi_composite_scores(result)
         result = _keep_serpapi_top_n_after_score(result)
         tool_outputs, result = _maybe_fetch_serpapi_page_and_enrich(
@@ -1567,14 +1816,7 @@ def web_search_subagent_tool(task_json: str) -> str:
         result = _fallback_result_from_tool_outputs(task, tool_outputs)
         result = _attach_serpapi_composite_scores(result)
         result["summarize_error"] = str(exc)
-    result = _merge_code_materialized_candidates(
-        result,
-        tavily_candidates=tavily_candidates,
-        context7_candidates=context7_candidates,
-        playwright_candidates=playwright_candidates,
-    )
-    result = _finalize_playwright_only_hitl(tool_outputs, result)
-    result["tool_evaluation_records"] = _build_web_tool_evaluation_records(tool_outputs)
+    result = _merge_all_web_tool_results_by_code(tool_outputs, result)
     return json.dumps(result, ensure_ascii=False)
 
 

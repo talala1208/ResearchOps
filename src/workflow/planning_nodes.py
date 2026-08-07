@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TypeVar
 
 from src.config.settings import get_workflow_config
 from src.llm.chat import build_chat_model
@@ -16,14 +16,290 @@ from src.schemas.state import ResearchState
 from src.workflow.node_utils import increase_search_step
 
 
+T = TypeVar("T")
+
+
 def _to_json(value: Any) -> str:
     """稳定序列化为 JSON 字符串。"""
 
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+def _dedupe_by_question_id(items: list[T]) -> list[T]:
+    """按 question_id 去重，后写覆盖先写（修复 LLM 偶发重复条目）。"""
+
+    by_id: dict[str, T] = {}
+    order: list[str] = []
+    for item in items:
+        question_id = getattr(item, "question_id", None)
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise ValueError("研究计划条目缺少合法 question_id")
+        if question_id not in by_id:
+            order.append(question_id)
+        by_id[question_id] = item
+    return [by_id[question_id] for question_id in order]
+
+
+def _source_types_by_question_id(payload: dict[str, Any]) -> dict[str, list[str]]:
+    """从标准与任务中汇总每个 question_id 的来源类型。"""
+
+    by_question: dict[str, list[str]] = {}
+    for item in payload.get("minimum_evidence_standard") or []:
+        if not isinstance(item, dict):
+            continue
+        question_id = item.get("question_id")
+        if not isinstance(question_id, str):
+            continue
+        sources = item.get("must_include_source_types") or item.get(
+            "required_source_types"
+        ) or []
+        if isinstance(sources, list):
+            by_question.setdefault(question_id, [])
+            for source in sources:
+                if isinstance(source, str) and source not in by_question[question_id]:
+                    by_question[question_id].append(source)
+    for task in payload.get("search_tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        question_id = task.get("question_id")
+        source_type = task.get("source_type")
+        if isinstance(question_id, str) and isinstance(source_type, str):
+            by_question.setdefault(question_id, [])
+            if source_type not in by_question[question_id]:
+                by_question[question_id].append(source_type)
+    return by_question
+
+
+def _coerce_authority_level(value: Any) -> str:
+    """将权威等级归一为 high/medium/low。"""
+
+    if not isinstance(value, str):
+        return "medium"
+    normalized = value.strip().lower()
+    aliases = {
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+        "official": "high",
+        "official_docs": "high",
+        "权威": "high",
+        "官方": "high",
+        "community": "low",
+        "blog": "low",
+        "user": "low",
+        "社区": "low",
+    }
+    return aliases.get(normalized, "medium")
+
+
+def _coerce_research_plan_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    """将 LLM 常见漂移结构归一到 ResearchPlanWithSearchTasksOutput。
+
+    已覆盖：
+    - 顶层包一层 research_plan，并用 topic 代替 research_goal
+    - sub_questions 缺少 required_source_types
+    - expected_evidence / minimum_evidence_standard 字段名漂移或缺省
+    - required_authority_level 写成 official/community 等别名
+    - search_tasks 缺少 attempt
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("研究计划 LLM 输出必须是 JSON 对象")
+
+    data = dict(payload)
+    nested = data.pop("research_plan", None)
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            if key not in data:
+                data[key] = value
+        if "research_goal" not in data:
+            data["research_goal"] = (
+                nested.get("research_goal")
+                or nested.get("topic")
+                or nested.get("goal")
+            )
+
+    if "research_goal" not in data or not data.get("research_goal"):
+        topic = data.pop("topic", None)
+        if isinstance(topic, str) and topic.strip():
+            data["research_goal"] = topic
+
+    source_by_question = _source_types_by_question_id(data)
+
+    coerced_sub_questions: list[dict[str, Any]] = []
+    for item in data.get("sub_questions") or []:
+        if not isinstance(item, dict):
+            continue
+        question_id = item.get("question_id")
+        sources = item.get("required_source_types")
+        if not isinstance(sources, list) or not sources:
+            sources = list(source_by_question.get(question_id, [])) or ["blog"]
+        coerced_sub_questions.append(
+            {
+                **item,
+                "required_source_types": sources,
+            }
+        )
+    data["sub_questions"] = coerced_sub_questions
+
+    coerced_expected: list[dict[str, Any]] = []
+    for item in data.get("expected_evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        question_id = item.get("question_id")
+        sources = item.get("required_source_types")
+        if not isinstance(sources, list) or not sources:
+            sources = list(source_by_question.get(question_id, [])) or ["blog"]
+        minimum_count = item.get("minimum_count")
+        if not isinstance(minimum_count, int) or minimum_count < 1:
+            minimum_count = 1
+        authority = _coerce_authority_level(item.get("required_authority_level"))
+        coerced_expected.append(
+            {
+                **item,
+                "minimum_count": minimum_count,
+                "required_source_types": sources,
+                "required_authority_level": authority,
+            }
+        )
+    data["expected_evidence"] = coerced_expected
+
+    coerced_standards: list[dict[str, Any]] = []
+    for item in data.get("minimum_evidence_standard") or []:
+        if not isinstance(item, dict):
+            continue
+        question_id = item.get("question_id")
+        min_total = item.get("min_total_evidence", item.get("minimum_count"))
+        if not isinstance(min_total, int) or min_total < 1:
+            min_total = 1
+        min_high = item.get("min_high_quality_sources", 0)
+        if not isinstance(min_high, int) or min_high < 0:
+            min_high = 0
+        must_include = item.get("must_include_source_types") or item.get(
+            "required_source_types"
+        )
+        if not isinstance(must_include, list) or not must_include:
+            must_include = list(source_by_question.get(question_id, [])) or ["blog"]
+        allow_degraded = item.get("allow_degraded_answer")
+        if not isinstance(allow_degraded, bool):
+            allow_degraded = True
+        coerced_standards.append(
+            {
+                **item,
+                "min_total_evidence": min_total,
+                "min_high_quality_sources": min_high,
+                "must_include_source_types": must_include,
+                "allow_degraded_answer": allow_degraded,
+            }
+        )
+    data["minimum_evidence_standard"] = coerced_standards
+
+    coerced_tasks: list[dict[str, Any]] = []
+    for task in data.get("search_tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        attempt = task.get("attempt", 1)
+        if not isinstance(attempt, int) or attempt < 1:
+            attempt = 1
+        coerced_tasks.append({**task, "attempt": attempt})
+    data["search_tasks"] = coerced_tasks
+
+    required_source_types = data.get("required_source_types")
+    if not isinstance(required_source_types, list) or not required_source_types:
+        collected: list[str] = []
+        for item in coerced_sub_questions:
+            for source in item.get("required_source_types") or []:
+                if isinstance(source, str) and source not in collected:
+                    collected.append(source)
+        for task in coerced_tasks:
+            source = task.get("source_type")
+            if isinstance(source, str) and source not in collected:
+                collected.append(source)
+        data["required_source_types"] = collected or ["blog"]
+
+    if "active_question_ids_after_dispatch" not in data:
+        data["active_question_ids_after_dispatch"] = [
+            item["question_id"]
+            for item in coerced_sub_questions
+            if isinstance(item.get("question_id"), str)
+        ]
+
+    return data
+
+
+def _parse_message_json_content(content: Any) -> dict[str, Any]:
+    """从聊天消息 content 解析 JSON 对象。"""
+
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        content = "\n".join(text_parts)
+    if not isinstance(content, str):
+        raise ValueError(f"无法解析研究计划输出类型：{type(content).__name__}")
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("研究计划 LLM 输出必须是 JSON 对象")
+    return parsed
+
+
+def _invoke_research_plan(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+) -> ResearchPlanWithSearchTasksOutput:
+    """调用规划 LLM，先取 JSON 再做确定性归一化，避免 structured parser 提前失败。"""
+
+    model = build_chat_model("research_planner").bind(
+        response_format={"type": "json_object"}
+    )
+    response = model.invoke(
+        [
+            ("system", system_prompt),
+            ("human", user_prompt),
+        ]
+    )
+    payload = _parse_message_json_content(getattr(response, "content", response))
+    coerced = _coerce_research_plan_dict(payload)
+    return ResearchPlanWithSearchTasksOutput.model_validate(coerced)
+
+
+def _normalize_research_plan(
+    plan: ResearchPlanWithSearchTasksOutput,
+) -> ResearchPlanWithSearchTasksOutput:
+    """规范化规划输出：对 expected / standard 列表按 question_id 去重。"""
+
+    return plan.model_copy(
+        update={
+            "expected_evidence": _dedupe_by_question_id(plan.expected_evidence),
+            "minimum_evidence_standard": _dedupe_by_question_id(
+                plan.minimum_evidence_standard
+            ),
+        }
+    )
+
+
 def _validate_research_plan(plan: ResearchPlanWithSearchTasksOutput) -> None:
-    """校验研究计划内部 ID 一致性。"""
+    """校验研究计划内部 ID 一致性。
+
+    `expected_evidence` / `minimum_evidence_standard` 应先经 `_normalize_research_plan`
+    去重；此处仍拒绝 sub_questions 重复，并要求三组 ID 集合完全一致。
+    """
 
     question_ids = [item.question_id for item in plan.sub_questions]
     if len(question_ids) != len(set(question_ids)):
@@ -95,15 +371,11 @@ def _run_initial_planning(state: ResearchState) -> dict[str, Any]:
         {"user_query": user_query},
     )
 
-    model = build_chat_model("research_planner").with_structured_output(
-        ResearchPlanWithSearchTasksOutput
+    plan = _invoke_research_plan(
+        system_prompt=prompt["system_prompt"],
+        user_prompt=user_prompt,
     )
-    plan = model.invoke(
-        [
-            ("system", prompt["system_prompt"]),
-            ("human", user_prompt),
-        ]
-    )
+    plan = _normalize_research_plan(plan)
     _validate_research_plan(plan)
 
     sub_questions = {item.question_id: item.model_dump() for item in plan.sub_questions}
