@@ -15,20 +15,16 @@ from typing import Any
 from langchain_core.tools import tool
 
 from src.config.settings import get_project_root
-from src.llm.chat import build_chat_model
-from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import LocalStructuredSearchQueryOutput
 
 
 DB_PATH = get_project_root() / "data" / "mock" / "ai_products.sqlite"
 
 SEED_PRODUCTS_PATH = get_project_root() / "data" / "mock" / "ai_products.json"
-
-
-def _structured_tool_config() -> dict[str, Any]:
-    """读取本地结构化搜索 YAML 配置。"""
-
-    return load_prompt("local_structured_search.yml")
+SNIPPET_TEMPLATE = (
+    "{name} 是 {category}。价格信息：{pricing}。核心功能：{features}。"
+    "目标用户：{target_users}。竞品：{competitors}。"
+)
 
 
 def load_seed_products() -> list[dict[str, str]]:
@@ -175,34 +171,44 @@ def structured_ai_product_search(query: str) -> str:
     )
 
 
-def _plan_structured_search_query(task: dict[str, Any]) -> LocalStructuredSearchQueryOutput:
-    """用本地资料检索共用 LLM 规划结构化搜索语句。"""
+def _fallback_structured_search_plan(query: str) -> LocalStructuredSearchQueryOutput:
+    """直达 structured_mock 且无路由计划时，用 query 确定性分词生成关键词。"""
 
-    prompt = _structured_tool_config()
-    user_prompt = render_prompt_template(
-        prompt["user_prompt_template"],
-        {
-            "task_id": task["task_id"],
-            "question_id": task["question_id"],
-            "source_type": task["source_type"],
-            "query": task["query"],
-        },
+    terms = [
+        term.strip()
+        for term in query.replace("，", " ").replace(",", " ").split()
+        if term.strip()
+    ]
+    if not terms and query.strip():
+        terms = [query.strip()]
+    if not terms:
+        raise ValueError("结构化资料搜索 query 不能为空")
+    return LocalStructuredSearchQueryOutput(
+        search_terms=terms,
+        sql_search_statement=(
+            "参数化 LIKE OR 查询；关键词：" + "、".join(terms)
+        ),
+        reasoning="无路由 structured_search_plan，使用 query 分词兜底",
     )
-    model = build_chat_model("local_document_search").with_structured_output(
-        LocalStructuredSearchQueryOutput
-    )
-    return model.invoke(
-        [
-            ("system", prompt["system_prompt"]),
-            ("human", user_prompt),
-        ]
-    )
+
+
+def _resolve_structured_search_plan(
+    task: dict[str, Any],
+) -> LocalStructuredSearchQueryOutput:
+    """优先使用路由同轮产出的 structured_search_plan；否则确定性分词兜底。"""
+
+    plan_payload = task.get("structured_search_plan")
+    if isinstance(plan_payload, dict):
+        return LocalStructuredSearchQueryOutput.model_validate(plan_payload)
+    if isinstance(plan_payload, LocalStructuredSearchQueryOutput):
+        return plan_payload
+    return _fallback_structured_search_plan(str(task.get("query") or ""))
 
 
 def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, Any]]:
     """按 SearchTask 查询结构化 mock 数据并返回工具结果。"""
 
-    structured_query = _plan_structured_search_query(task)
+    structured_query = _resolve_structured_search_plan(task)
     rows = search_ai_products_by_terms(
         search_terms=structured_query.search_terms,
         limit=5,
@@ -210,8 +216,7 @@ def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, A
     results = []
     for row in rows:
         result_id = f"R_structured_{task['task_id']}_{row['id']}"
-        config = _structured_tool_config()
-        snippet = str(config["snippet_template"]).format(**row)
+        snippet = SNIPPET_TEMPLATE.format(**row)
         results.append(
             {
                 "result_id": result_id,

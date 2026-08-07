@@ -16,12 +16,15 @@ SourceType = Literal[
     "github",
     "product_directory",
     "traffic_data",
+    "local",
     "structured_mock",
     "local_document",
+    "local_rag",
 ]
 Priority = Literal["high", "medium", "low"]
 AuthorityLevel = Literal["high", "medium", "low"]
 SafetyRiskLevel = Literal["low", "medium", "high"]
+LocalSearchToolName = Literal["local_document", "local_rag", "structured_mock"]
 
 
 class InputGuardOutput(BaseModel):
@@ -168,6 +171,47 @@ class LocalStructuredSearchQueryOutput(BaseModel):
         description="可观测的结构化查询说明，不直接拼接执行。",
     )
     reasoning: str = Field(description="简短说明为什么选择这些关键词。")
+
+
+class LocalSearchTaskRouteOutput(BaseModel):
+    """单个伞类型 local 任务的工具路由与入参。"""
+
+    task_id: str = Field(description="必须对应该批输入中的某个 SearchTask.task_id")
+    tools: list[LocalSearchToolName] = Field(
+        min_length=1,
+        description="选定的一个或多个具体本地检索工具，按相关性可多选。",
+    )
+    reasoning: str = Field(description="简短说明为何选择这些本地工具。")
+    local_rag_query: str | None = Field(
+        default=None,
+        description=(
+            "当 tools 含 local_rag 时必填非空：向量检索 query；"
+            "未选 local_rag 时必须为 null。"
+        ),
+    )
+    local_document_query: str | None = Field(
+        default=None,
+        description=(
+            "当 tools 含 local_document 时必填非空：Markdown 关键词检索 query；"
+            "未选 local_document 时必须为 null。"
+        ),
+    )
+    structured_search: LocalStructuredSearchQueryOutput | None = Field(
+        default=None,
+        description=(
+            "当 tools 含 structured_mock 时必填：安全关键词与查询说明；"
+            "未选 structured_mock 时必须为 null。"
+        ),
+    )
+
+
+class LocalSearchBatchRouteOutput(BaseModel):
+    """本轮全部伞类型 local 任务的批量路由输出。"""
+
+    task_routes: list[LocalSearchTaskRouteOutput] = Field(
+        min_length=1,
+        description="按 task_id 覆盖本批每个伞类型 local 任务的工具选择与入参。",
+    )
 
 
 class ResearchReportOutput(BaseModel):

@@ -63,7 +63,7 @@ class SafetyReviewAppendixTest(unittest.TestCase):
         self.assertIn("### Web 证据", final_report)
         self.assertIn("- [E1][网页标题](https://example.com/a)", final_report)
         self.assertIn("### Local 证据", final_report)
-        self.assertIn("- [E2] 本地标题", final_report)
+        self.assertIn("- [E2] `a.md` — 本地标题", final_report)
         self.assertEqual(result["report_draft"], "")
 
 

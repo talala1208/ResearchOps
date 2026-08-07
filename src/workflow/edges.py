@@ -41,8 +41,8 @@ def route_after_plan_research(state: ResearchState) -> list[str]:
     """检索任务分发后的条件路由。
 
     当前图里 Web 检索和本地资料检索两个节点需要并行汇聚到同一个清洗节点。
-    结构化 mock 数据也属于本地资料检索能力，由 `local_document_search_tool`
-    根据 `search_tasks.source_type` 在内部选择 Markdown 关键词搜索或结构化 SQL 查询。
+    结构化 mock 数据与本地 RAG 也属于本地资料检索能力，由 `local_document_search_tool`
+    对伞类型 `local` 先路由再执行；也可兼容历史具体 source_type 直达对应工具。
     """
 
     return [

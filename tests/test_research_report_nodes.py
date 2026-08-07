@@ -446,7 +446,7 @@ class CitedEvidenceAppendixTest(unittest.TestCase):
             appendix,
         )
         self.assertIn("- [E10] Context7 文档", appendix)
-        self.assertIn("- [E2] 本地笔记", appendix)
+        self.assertIn("- [E2] `note.md` — 本地笔记", appendix)
         self.assertLess(appendix.index("[E1]"), appendix.index("[E10]"))
 
         final = report_nodes.append_cited_evidence_appendix("# 报告正文\n", state)

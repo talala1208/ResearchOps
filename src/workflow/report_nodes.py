@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from src.artifacts.evidence_content import load_evidence_content
@@ -571,19 +572,45 @@ def _web_evidence_url(evidence: dict[str, Any]) -> str | None:
     return None
 
 
+def _local_document_filename(evidence: dict[str, Any]) -> str | None:
+    """从 local_document 证据的 url_or_path 提取 Markdown 文件名。"""
+
+    if str(evidence.get("source_type") or "") != "local_document":
+        return None
+    for key in ("url_or_path", "url"):
+        value = evidence.get(key)
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if not cleaned or cleaned.startswith(("http://", "https://", "placeholder://")):
+            continue
+        name = Path(cleaned).name
+        if name:
+            return name
+    return None
+
+
 def _format_cited_evidence_line(
     evidence_id: str,
     evidence: dict[str, Any],
     *,
     as_web: bool,
 ) -> str:
-    """格式化单条引用证据：只含代号与 title。"""
+    """格式化单条引用证据：代号与 title；local_document 附带 md 文件名。"""
 
     title = str(evidence.get("title") or evidence_id).strip() or evidence_id
     if as_web:
         url = _web_evidence_url(evidence)
         if url:
             return f"- [{evidence_id}][{_escape_markdown_link_text(title)}]({url})"
+        return f"- [{evidence_id}] {title}"
+
+    filename = _local_document_filename(evidence)
+    if filename:
+        stem = Path(filename).stem
+        if title == stem or title == filename:
+            return f"- [{evidence_id}] `{filename}`"
+        return f"- [{evidence_id}] `{filename}` — {title}"
     return f"- [{evidence_id}] {title}"
 
 

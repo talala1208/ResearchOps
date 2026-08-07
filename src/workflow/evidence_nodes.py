@@ -26,12 +26,17 @@ PRIORITY_WEIGHT = {
 }
 HIGH_QUALITY_RELIABILITY_THRESHOLD = 0.7
 EVIDENCE_SUFFICIENCY_THRESHOLD = 0.75
+LOCAL_UMBRELLA_SOURCE_TYPE = "local"
+LOCAL_CONCRETE_SOURCE_TYPES = frozenset(
+    {"local_document", "local_rag", "structured_mock"}
+)
 SOURCE_AUTHORITY_SCORE = {
     "official_docs": 0.95,
     "pricing_page": 0.9,
     "changelog": 0.85,
     "github": 0.8,
     "structured_mock": 0.75,
+    "local_rag": 0.92,
     "local_document": 0.7,
     "blog": 0.65,
     "product_directory": 0.6,
@@ -656,6 +661,31 @@ def build_evidence_matrix(state: ResearchState) -> dict[str, Any]:
     }
 
 
+def _source_type_covered(
+    required_source_type: str,
+    covered_source_types: list[str] | set[str],
+) -> bool:
+    """判断 required 来源是否被 covered 满足；伞类型 local 可由任一具体本地类型覆盖。"""
+
+    covered = set(covered_source_types)
+    if required_source_type == LOCAL_UMBRELLA_SOURCE_TYPE:
+        return bool(covered & LOCAL_CONCRETE_SOURCE_TYPES)
+    return required_source_type in covered
+
+
+def _missing_required_source_types(
+    required_source_types: list[str],
+    covered_source_types: list[str],
+) -> list[str]:
+    """返回尚未被覆盖的 required 来源类型。"""
+
+    return sorted(
+        source_type
+        for source_type in set(required_source_types)
+        if not _source_type_covered(source_type, covered_source_types)
+    )
+
+
 def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
     """按最低证据标准和 Priority 判断整体证据是否充足。"""
 
@@ -692,20 +722,29 @@ def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
             if high_quality_required == 0
             else min(high_quality_evidence_count / high_quality_required, 1.0)
         )
+        required_unique = list(dict.fromkeys(required_source_types))
+        covered_required_count = sum(
+            1
+            for source_type in required_unique
+            if _source_type_covered(source_type, covered_source_types)
+        )
         source_score = (
             1.0
-            if not required_source_types
-            else len(set(covered_source_types) & set(required_source_types))
-            / len(set(required_source_types))
+            if not required_unique
+            else covered_required_count / len(required_unique)
         )
         weighted_score = round(
             count_score * 0.5 + high_quality_score * 0.3 + source_score * 0.2,
             4,
         )
+        missing_source_types = _missing_required_source_types(
+            required_source_types,
+            covered_source_types,
+        )
         minimum_standard_met = (
             collected_evidence_count >= standard["min_total_evidence"]
             and high_quality_evidence_count >= standard["min_high_quality_sources"]
-            and set(required_source_types).issubset(set(covered_source_types))
+            and not missing_source_types
         )
 
         missing_parts = []
@@ -713,7 +752,6 @@ def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
             missing_parts.append("证据数量不足")
         if high_quality_evidence_count < standard["min_high_quality_sources"]:
             missing_parts.append("高质量证据不足")
-        missing_source_types = sorted(set(required_source_types) - set(covered_source_types))
         if missing_source_types:
             missing_parts.append(f"缺少来源类型：{', '.join(missing_source_types)}")
 

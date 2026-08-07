@@ -12,6 +12,9 @@ from langsmith.utils import ContextThreadPoolExecutor
 from src.artifacts.tool_content_cleanup import compact_devtools_observation
 from src.schemas.state import ResearchState
 from src.tools.local_document_search import query_local_documents_for_task
+from src.tools.local_rag_search import query_local_rag_for_task
+from src.llm.structured_outputs import LocalSearchBatchRouteOutput, LocalSearchTaskRouteOutput
+from src.tools.local_search_router import route_local_search_tools
 from src.tools.structured_data import query_structured_products_for_task
 from src.tools.online_mcp_tools import devtools_mcp_inspect_page
 from src.tools.web_search_subagent import run_web_search_subagent_for_task
@@ -28,8 +31,10 @@ WEB_SOURCE_TYPES = {
     "product_directory",
     "traffic_data",
 }
-LOCAL_SOURCE_TYPES = {"local_document", "structured_mock"}
+LOCAL_CONCRETE_SOURCE_TYPES = {"local_document", "local_rag", "structured_mock"}
+LOCAL_SOURCE_TYPES = {"local", *LOCAL_CONCRETE_SOURCE_TYPES}
 MARKDOWN_SOURCE_TYPES = {"local_document"}
+LOCAL_RAG_SOURCE_TYPES = {"local_rag"}
 STRUCTURED_SOURCE_TYPES = {"structured_mock"}
 DEFAULT_WEB_SEARCH_TASK_CONCURRENCY = 3
 
@@ -350,31 +355,179 @@ def _query_structured_task(task: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _query_local_rag_task(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """执行本地向量 RAG 检索。"""
+
+    try:
+        return query_local_rag_for_task(task)
+    except Exception as exc:  # noqa: BLE001 - 工具失败要显式暴露给后续节点
+        return [
+            {
+                **_build_placeholder_result(
+                    task=task,
+                    collected_by="local_rag_search",
+                    source_name="local_langsmith_docs_rag",
+                    title_prefix="本地 RAG 检索失败",
+                    url_or_path_prefix="placeholder://local_rag/error",
+                ),
+                "blocked_reason": str(exc),
+                "local_payload": {"error": str(exc)},
+            }
+        ]
+
+
+def _expand_task_route(
+    task: dict[str, Any],
+    route: LocalSearchTaskRouteOutput,
+) -> list[dict[str, Any]]:
+    """将单个任务路由计划展开为具体本地工具调用。"""
+
+    resolved_tasks: list[dict[str, Any]] = []
+    for tool in route.tools:
+        resolved = dict(task)
+        resolved["source_type"] = tool
+        resolved["search_provider"] = "local_document_search"
+        resolved["local_route"] = {
+            "tools": list(route.tools),
+            "reasoning": route.reasoning,
+            "local_rag_query": route.local_rag_query,
+            "local_document_query": route.local_document_query,
+        }
+        if tool == "local_rag":
+            if not route.local_rag_query:
+                raise ValueError("路由选中 local_rag 但未提供 local_rag_query")
+            resolved["query"] = route.local_rag_query
+        elif tool == "local_document":
+            if not route.local_document_query:
+                raise ValueError(
+                    "路由选中 local_document 但未提供 local_document_query"
+                )
+            resolved["query"] = route.local_document_query
+        elif tool == "structured_mock":
+            if route.structured_search is None:
+                raise ValueError(
+                    "路由选中 structured_mock 但未提供 structured_search"
+                )
+            resolved["structured_search_plan"] = route.structured_search.model_dump()
+        resolved_tasks.append(resolved)
+    return resolved_tasks
+
+
+def _dispatch_concrete_local_task(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """按具体本地 source_type 执行检索。"""
+
+    source_type = task["source_type"]
+    if source_type in MARKDOWN_SOURCE_TYPES:
+        return _query_markdown_task(task)
+    if source_type in LOCAL_RAG_SOURCE_TYPES:
+        return _query_local_rag_task(task)
+    if source_type in STRUCTURED_SOURCE_TYPES:
+        return _query_structured_task(task)
+    raise ValueError(f"local_document_search_tool 不支持的 source_type：{source_type}")
+
+
+def _run_concrete_local_tasks(concrete_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """对具体本地工具调用并行执行，并按原顺序合并结果。"""
+
+    if not concrete_tasks:
+        return []
+    if len(concrete_tasks) == 1:
+        return _dispatch_concrete_local_task(concrete_tasks[0])
+
+    ordered_results: list[list[dict[str, Any]] | None] = [None] * len(concrete_tasks)
+    with ContextThreadPoolExecutor(max_workers=len(concrete_tasks)) as executor:
+        future_map = {
+            executor.submit(_dispatch_concrete_local_task, task): index
+            for index, task in enumerate(concrete_tasks)
+        }
+        for future in as_completed(future_map):
+            index = future_map[future]
+            ordered_results[index] = future.result()
+
+    merged: list[dict[str, Any]] = []
+    for chunk in ordered_results:
+        if chunk is None:
+            raise RuntimeError("本地工具并行执行结果缺失")
+        merged.extend(chunk)
+    return merged
+
+
+def _router_failure_results(
+    tasks: list[dict[str, Any]],
+    exc: Exception,
+) -> list[dict[str, Any]]:
+    """路由失败时为每个伞任务生成占位结果。"""
+
+    return [
+        {
+            **_build_placeholder_result(
+                task=task,
+                collected_by="local_search_router",
+                source_name="local_search_router",
+                title_prefix="本地工具路由失败",
+                url_or_path_prefix="placeholder://local/error",
+            ),
+            "blocked_reason": str(exc),
+            "local_payload": {"error": str(exc)},
+        }
+        for task in tasks
+    ]
+
+
 def local_document_search_tool(state: ResearchState) -> dict[str, Any]:
     """本地资料检索节点。
 
     读取：`search_tasks`
     写入：`local_document_results`
 
+    - 规划侧伞类型 `local`：对本轮全部伞任务只调用一次 local_document_search 模型，
+      按 task_id 选定工具并同轮产出入参，再并行执行。
     - `local_document`：搜索 `LOCAL_DOCUMENTS_BASE_PATH` 下的 Markdown 文件。
-    - `structured_mock`：查询本地结构化 mock 数据。
+    - `local_rag`：检索预构建本地向量库（当前为 LangSmith docs embedding）。
+    - `structured_mock`：查询本地结构化 mock 数据（优先使用路由同轮关键词；直达无计划时用 query 分词兜底）。
 
-    结构化数据也属于本地资料检索能力；后续 PDF 等本地资料类型也应
+    结构化数据与本地 RAG 也属于本地资料检索能力；后续 PDF 等本地资料类型也应
     继续并入该节点，而不是新增独立 Graph 节点。
     """
 
     tasks = _tasks_by_source_type(state, LOCAL_SOURCE_TYPES)
-    results = []
+    umbrella_tasks = [task for task in tasks if task["source_type"] == "local"]
+    concrete_input_tasks = [
+        task for task in tasks if task["source_type"] in LOCAL_CONCRETE_SOURCE_TYPES
+    ]
+
+    batch: LocalSearchBatchRouteOutput | None = None
+    if umbrella_tasks:
+        try:
+            batch = route_local_search_tools(umbrella_tasks)
+        except Exception as exc:  # noqa: BLE001 - 路由失败也要显式暴露
+            return {
+                **record_node(state, "local_document_search_tool"),
+                "local_document_results": [
+                    *_run_concrete_local_tasks(concrete_input_tasks),
+                    *_router_failure_results(umbrella_tasks, exc),
+                ],
+            }
+
+    route_by_id = (
+        {route.task_id: route for route in batch.task_routes} if batch is not None else {}
+    )
+    concrete_tasks: list[dict[str, Any]] = []
     for task in tasks:
         source_type = task["source_type"]
-        if source_type in MARKDOWN_SOURCE_TYPES:
-            results.extend(_query_markdown_task(task))
-        elif source_type in STRUCTURED_SOURCE_TYPES:
-            results.extend(_query_structured_task(task))
-        else:
-            raise ValueError(f"local_document_search_tool 不支持的 source_type：{source_type}")
+        if source_type in LOCAL_CONCRETE_SOURCE_TYPES:
+            concrete_tasks.append(task)
+            continue
+        if source_type != "local":
+            raise ValueError(
+                f"local_document_search_tool 不支持的 source_type：{source_type}"
+            )
+        route = route_by_id.get(task["task_id"])
+        if route is None:
+            raise ValueError(f"批量路由缺少 task_id：{task['task_id']}")
+        concrete_tasks.extend(_expand_task_route(task, route))
 
     return {
         **record_node(state, "local_document_search_tool"),
-        "local_document_results": results,
+        "local_document_results": _run_concrete_local_tasks(concrete_tasks),
     }

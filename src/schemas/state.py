@@ -15,8 +15,10 @@ SourceType = Literal[
     "github",
     "product_directory",
     "traffic_data",
+    "local",
     "structured_mock",
     "local_document",
+    "local_rag",
 ]
 
 Priority = Literal["high", "medium", "low"]

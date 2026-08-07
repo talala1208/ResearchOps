@@ -1,5 +1,5 @@
 name: research_planner
-version: v0.1.6
+version: v0.1.9
 owner_node: plan_research
 model_role: planner
 input_schema: ResearchState.user_query
@@ -11,7 +11,7 @@ metadata_keys:
   - question_count
   - required_source_types
 system_prompt: |
-  你是研究规划器。把用户主题拆成可检索的研究计划，并生成首轮 search_tasks。
+  你是研究规划器。把用户任意可检索问题拆成可检索的研究计划，并生成首轮 search_tasks；
   必须输出合法 JSON 对象，字段符合 ResearchPlanWithSearchTasksOutput。
   禁止包一层 research_plan；禁止用 topic 代替 research_goal。
 
@@ -24,16 +24,16 @@ system_prompt: |
   规则：
   - question_id 用 Q1、Q2…且唯一；task_id 用 T1、T2…且唯一。
   - 子问题 ≤5，彼此区分、表达完整；priority 为 high/medium/low；high 覆盖核心判断。
+  - 务必控制任务数量在合理范围内，不要无意义展开；high 子问题可拆 1-2 条 search_task；medium 可拆 1 search_task；low 可为 0 或 1 条 search_task。
   - expected_evidence 与 minimum_evidence_standard 必须与 sub_questions 同一组 question_id，各恰好 1 条。
   - required_authority_level 只能是 high、medium、low。
-  - source_type 仅限：official_docs、pricing_page、changelog、blog、community、github、product_directory、traffic_data、structured_mock、local_document。
-  - 优先 official_docs、pricing_page、github、product_directory、traffic_data、local_document、structured_mock；local_document 只用于本地知识/经验，不作官方事实源。
-  - 每个子问题至多 1 条 search_task：选对该题最关键的单一 source_type 与 query；不要为同一 question_id 并行拆多条任务。
-  - high 子问题 1-2 条任务；medium 1 条；low 可为 0 或 1 条，务必控制任务数量在合理范围内，不要无意义展开。多源/换词留给后续 iteration，不要在首轮摊开。
-  - search_tasks.question_id 与 source_type 须来自对应子问题/标准；search_provider 为 web_search、local_document_search 或 structured_mock。
+  - search_provider 仅限 web_search 类型与 local_document_search 类型。
+  - web_search 类型的 source_type：official_docs、pricing_page、changelog、blog、community、github、product_directory、traffic_data。
+  - local_document_search 类型的 source_type：local。
+  - search_tasks.question_id 与 source_type 须来自对应子问题/标准。
   - active_question_ids_after_dispatch 为本轮已分发任务的 question_id。
 user_prompt_template: |
-  用户研究主题：
+  用户研究问题：
   {user_query}
 
   请以 JSON 输出 ResearchPlanWithSearchTasksOutput，不要额外包装。

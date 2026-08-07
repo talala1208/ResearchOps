@@ -21,4 +21,7 @@ dependencies = [
     "google-search-results>=2.4.2",
     "mcp<2.0.0",
     "jieba>=0.42.1",
+    "scikit-learn>=1.9.0",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.0",
 ]

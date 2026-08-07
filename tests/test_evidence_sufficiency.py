@@ -70,6 +70,44 @@ class EvidenceSufficiencyTest(unittest.TestCase):
         self.assertIsNone(result["degradation_reason"])
         self.assertFalse(sufficiency["high_priority_all_met"])
 
+    def test_local_umbrella_required_is_covered_by_concrete_local_type(self) -> None:
+        """must_include 含 local 时，covered 有 local_rag 即视为满足。"""
+
+        state = {
+            "sub_questions": {
+                "Q1": {
+                    "question_id": "Q1",
+                    "question": "LangSmith 文档",
+                    "priority": "high",
+                    "required_source_types": ["local"],
+                }
+            },
+            "minimum_evidence_standard": {
+                "Q1": {
+                    "question_id": "Q1",
+                    "min_total_evidence": 1,
+                    "min_high_quality_sources": 0,
+                    "must_include_source_types": ["local"],
+                    "allow_degraded_answer": True,
+                }
+            },
+            "evidence_matrix": {
+                "Q1": {
+                    "question_id": "Q1",
+                    "covered_source_types": ["local_rag"],
+                    "evidence_ids": ["E1"],
+                    "high_quality_evidence_ids": [],
+                }
+            },
+        }
+
+        result = check_evidence_sufficiency(state)
+        status = result["evidence_sufficiency_result"]["question_status"]["Q1"]
+
+        self.assertTrue(status["minimum_standard_met"])
+        self.assertIsNone(status["missing_reason"])
+        self.assertEqual(status["weighted_score"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
