@@ -22,7 +22,9 @@ class WebHITLDevToolsTest(unittest.TestCase):
                     "task_id": "T1",
                     "question_id": "Q1",
                     "url_or_path": "https://example.com/login",
+                    "source_name": "playwright",
                     "requires_login": True,
+                    "playwright_hitl": True,
                     "blocked_reason": "检测到登录页",
                 }
             ],
@@ -47,8 +49,8 @@ class WebHITLDevToolsTest(unittest.TestCase):
             observation,
         )
 
-    def test_web_hitl_request_skips_non_login_results(self) -> None:
-        """普通 Web 结果不会调用 DevTools。"""
+    def test_web_hitl_request_skips_non_playwright_login_flags(self) -> None:
+        """非 Playwright 来源即使 requires_login 也不应进入 DevTools HITL。"""
 
         state = {
             "web_search_results": [
@@ -57,7 +59,8 @@ class WebHITLDevToolsTest(unittest.TestCase):
                     "task_id": "T1",
                     "question_id": "Q1",
                     "url_or_path": "https://example.com",
-                    "requires_login": False,
+                    "source_name": "serpapi",
+                    "requires_login": True,
                 }
             ],
         }
@@ -66,6 +69,7 @@ class WebHITLDevToolsTest(unittest.TestCase):
 
         inspect_mock.assert_not_called()
         self.assertEqual(result["web_hitl_decisions"], [])
+        self.assertFalse(result["web_hitl_required"])
 
 
 if __name__ == "__main__":

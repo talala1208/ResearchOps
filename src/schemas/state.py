@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Literal, TypedDict
-
-
-def merge_dict(left: dict, right: dict) -> dict:
-    """合并并行节点写入的字典状态。"""
-
-    return {**left, **right}
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 
 SourceType = Literal[
@@ -93,7 +87,6 @@ class EvidenceItem(TypedDict):
     snippet: str
     published_at: str | None
     collected_by: str
-    authority_score: float
     freshness_score: float
     relevance_score: float
     answer_coverage_score: float
@@ -101,6 +94,10 @@ class EvidenceItem(TypedDict):
     reliability_score: float
     score_reason: str | None
     used_in_final_report: bool
+    content_path: NotRequired[str | None]
+    library_id: NotRequired[str | None]
+    score_bucket: NotRequired[str]
+    scored_by: NotRequired[str]
 
 
 class ConflictItem(TypedDict):
@@ -203,6 +200,7 @@ class EvaluationMetrics(TypedDict):
     evidence_count: int
     final_citation_count: int
     conflict_count: int
+    discarded_candidate_count: int
     degraded: bool
     degradation_reason: str | None
     review_score: float | None
@@ -222,8 +220,8 @@ class ResearchState(TypedDict, total=False):
 
     关联约定：
     - `sub_questions` 是 `question_id -> SubQuestion` 的唯一问题目录。
-    - `expected_evidence`、`minimum_evidence_standard`、`question_evidence_status`
-      必须使用同一组 `question_id` 作为 key。
+    - `expected_evidence`、`minimum_evidence_standard`、
+      `evidence_sufficiency_result.question_status` 必须使用同一组 `question_id`。
     - `evidence_items` 是 `evidence_id -> EvidenceItem` 的唯一证据目录。
     - `conflicts` 是 `conflict_id -> ConflictItem` 的唯一冲突目录。
     - 跨结构关联只保存 ID，不复制问题正文或证据正文。
@@ -258,19 +256,14 @@ class ResearchState(TypedDict, total=False):
     web_hitl_reason: str | None
     web_hitl_decisions: list[dict]
     local_document_results: list[dict]
-    sanitized_results: list[dict]
 
-    # 证据治理
-    evidence_items: Annotated[dict[str, EvidenceItem], merge_dict]  # key: evidence_id
+    # 证据治理（evidence_items / conflicts 由 evaluate_evidence_quality 整表替换）
+    evidence_items: dict[str, EvidenceItem]  # key: evidence_id
     evidence_clusters: list[dict]
+    discarded_candidate_count: int
     evidence_matrix: dict
     evidence_sufficiency_result: EvidenceSufficiencyResult
-    question_evidence_status: dict[str, QuestionEvidenceStatus]  # key: question_id
-    evidence_sufficiency_score: float
-    evidence_sufficiency_threshold: float
-    evidence_sufficient: bool
-    insufficient_question_ids: list[str]
-    conflicts: Annotated[dict[str, ConflictItem], merge_dict]  # key: conflict_id
+    conflicts: dict[str, ConflictItem]  # key: conflict_id
 
     # HITL
     hitl_required: bool

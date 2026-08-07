@@ -61,11 +61,14 @@ class EvidenceSufficiencyTest(unittest.TestCase):
         }
 
         result = check_evidence_sufficiency(state)
+        sufficiency = result["evidence_sufficiency_result"]
 
-        self.assertGreaterEqual(result["evidence_sufficiency_score"], 0.75)
-        self.assertTrue(result["evidence_sufficient"])
+        self.assertNotIn("evidence_sufficient", result)
+        self.assertNotIn("question_evidence_status", result)
+        self.assertGreaterEqual(sufficiency["overall_score"], 0.75)
+        self.assertTrue(sufficiency["sufficient"])
         self.assertIsNone(result["degradation_reason"])
-        self.assertFalse(result["evidence_sufficiency_result"]["high_priority_all_met"])
+        self.assertFalse(sufficiency["high_priority_all_met"])
 
 
 if __name__ == "__main__":

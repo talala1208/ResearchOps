@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from src.tools import web_search_subagent
 from src.tools.web_search_subagent import (
-    _normalize_web_hitl_decision,
+    _finalize_playwright_only_hitl,
     _parse_json_object_from_model_output,
 )
 
@@ -40,8 +40,8 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
         self.assertTrue(parsed["web_hitl_required"])
         self.assertEqual(parsed["hitl_reason"], "需要人工确认")
 
-    def test_page_fetch_failure_does_not_force_hitl_when_search_result_is_usable(self) -> None:
-        """页面正文抓取失败但搜索结果可用时，不应默认进入 HITL。"""
+    def test_page_fetch_failure_does_not_force_hitl_without_login_signal(self) -> None:
+        """普通 Playwright 抓取失败不应触发 Web HITL。"""
 
         result = {
             "results": [
@@ -58,11 +58,54 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
             "web_hitl_required": True,
             "hitl_reason": "playwright 页面正文抓取失败：about:blank 空内容",
         }
+        tool_outputs = [
+            {
+                "tool_name": "playwright_mcp_fetch_serpapi_result_page_1",
+                "ok": False,
+                "error": "about:blank empty content",
+                "input": {"url": "https://example.com/article"},
+                "output": {},
+            }
+        ]
 
-        normalized = _normalize_web_hitl_decision(result)
+        normalized = _finalize_playwright_only_hitl(tool_outputs, result)
 
         self.assertFalse(normalized["web_hitl_required"])
-        self.assertIn("降级为候选证据", normalized["hitl_reason"])
+        self.assertIsNone(normalized["hitl_reason"])
+
+    def test_playwright_login_signal_triggers_hitl(self) -> None:
+        """Playwright 检测到登录墙时应触发 Web HITL。"""
+
+        result = {
+            "results": [
+                {
+                    "title": "Private Doc",
+                    "url": "https://example.com/login-required",
+                    "url_or_path": "https://example.com/login-required",
+                    "snippet": "teaser",
+                    "source_name": "serpapi",
+                    "requires_login": False,
+                }
+            ],
+            "web_hitl_required": False,
+            "hitl_reason": None,
+        }
+        tool_outputs = [
+            {
+                "tool_name": "playwright_mcp_fetch_serpapi_result_page_1",
+                "ok": False,
+                "error": "Please sign in to continue",
+                "input": {"url": "https://example.com/login-required"},
+                "output": {"snapshot_result": "login form"},
+            }
+        ]
+
+        finalized = _finalize_playwright_only_hitl(tool_outputs, result)
+
+        self.assertTrue(finalized["web_hitl_required"])
+        self.assertTrue(finalized["results"][0]["requires_login"])
+        self.assertTrue(finalized["results"][0]["playwright_hitl"])
+        self.assertIn("登录", finalized["hitl_reason"])
 
 
 class WebSearchSubAgentDispatchTest(unittest.TestCase):
@@ -159,10 +202,9 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             ["tavily_mcp_search", "serp_api_search"],
         )
 
-    def test_compact_tool_outputs_for_summarize_trims_payload(self) -> None:
-        """汇总前保留全部搜索结果字段裁剪，并截断 Playwright / Context7 正文。"""
+    def test_compact_tool_outputs_for_summarize_only_keeps_serp(self) -> None:
+        """汇总 LLM 只接收 SerpAPI 压缩结果。"""
 
-        long_body = "正文" * 2000
         tool_outputs = [
             {
                 "tool_name": "serp_api_search",
@@ -179,10 +221,41 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                             "source": "example",
                             "position": index,
                         }
-                        for index in range(1, 8)
+                        for index in range(1, 4)
                     ],
                 },
             },
+            {
+                "tool_name": "tavily_mcp_search",
+                "ok": True,
+                "error": None,
+                "output": {"provider": "tavily_mcp", "results": []},
+            },
+            {
+                "tool_name": "context7_mcp_query",
+                "ok": True,
+                "error": None,
+                "output": {"provider": "context7_mcp", "docs_result": "docs"},
+            },
+            {
+                "tool_name": "playwright_mcp_fetch_page",
+                "ok": True,
+                "error": None,
+                "input": {"url": "https://example.com/page"},
+                "output": {"title": "Page", "snapshot_result": "body"},
+            },
+        ]
+
+        compact = web_search_subagent._compact_tool_outputs_for_summarize(tool_outputs)
+        self.assertEqual([item["tool_name"] for item in compact], ["serp_api_search"])
+        serp = compact[0]["output"]["results"]
+        self.assertEqual(len(serp), 3)
+        self.assertEqual(set(serp[0].keys()), {"title", "url", "snippet", "published_at"})
+
+    def test_materialize_tavily_keeps_score_without_summarize(self) -> None:
+        """Tavily 结果应保留 score 并由代码物化，不依赖 summarize。"""
+
+        tool_outputs = [
             {
                 "tool_name": "tavily_mcp_search",
                 "ok": True,
@@ -193,18 +266,33 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                         {
                             "results": [
                                 {
-                                    "title": f"Tv{index}",
-                                    "url": f"https://tavily.example/{index}",
-                                    "content": f"C{index}",
-                                    "published_date": "2026-02-01",
+                                    "title": "Tavily Doc",
+                                    "url": "https://tavily.example/doc",
+                                    "content": "答案相关摘要",
+                                    "score": 0.91,
+                                    "published_date": "2026-03-01",
                                 }
-                                for index in range(1, 6)
                             ]
                         },
                         ensure_ascii=False,
                     ),
                 },
-            },
+            }
+        ]
+
+        candidates = web_search_subagent._materialize_tavily_results_from_tool_outputs(
+            tool_outputs
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["score"], 0.91)
+        self.assertEqual(candidates[0]["url"], "https://tavily.example/doc")
+        self.assertEqual(candidates[0]["snippet"], "答案相关摘要")
+        self.assertEqual(candidates[0]["source_name"], "tavily")
+
+    def test_materialize_context7_without_summarize(self) -> None:
+        """Context7 应保留 docs_result/resolve_result，不进 summarize。"""
+
+        tool_outputs = [
             {
                 "tool_name": "context7_mcp_query",
                 "ok": True,
@@ -214,69 +302,31 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "raw_result": json.dumps(
                         {
                             "library_id": "/demo/lib",
-                            "resolve_result": "resolve " + ("r" * 1000),
-                            "docs_result": long_body,
+                            "resolve_result": "resolved",
+                            "docs_result": "official docs body",
                         },
                         ensure_ascii=False,
                     ),
                 },
-            },
-            {
-                "tool_name": "playwright_mcp_fetch_serpapi_result_page_1",
-                "ok": True,
-                "error": None,
-                "input": {"url": "https://example.com/page"},
-                "output": {
-                    "navigation_result": "ok",
-                    "snapshot_result": long_body,
-                    "title": "Page",
-                },
-            },
+            }
         ]
-
-        with patch.dict(
-            "os.environ",
-            {
-                "WEB_SEARCH_CONTEXT7_MAX_CHARS": "1000",
-                "WEB_SEARCH_PLAYWRIGHT_MAX_CHARS": "800",
-            },
-        ):
-            compact = web_search_subagent._compact_tool_outputs_for_summarize(tool_outputs)
-
-        serp = compact[0]["output"]["results"]
-        self.assertEqual(len(serp), 7)
-        self.assertEqual(set(serp[0].keys()), {"title", "url", "snippet", "published_at"})
-
-        tavily = compact[1]["output"]["results"]
-        self.assertEqual(len(tavily), 5)
-
-        context7_docs = compact[2]["output"]["docs_result"]
-        self.assertLessEqual(len(context7_docs), 1000 + len("...[truncated]"))
-        self.assertTrue(context7_docs.endswith("...[truncated]"))
-
-        playwright = compact[3]["output"]
-        self.assertEqual(playwright["url"], "https://example.com/page")
-        self.assertEqual(playwright["title"], "Page")
-        self.assertLessEqual(len(playwright["content"]), 800 + len("...[truncated]"))
-        self.assertNotIn("snapshot_result", playwright)
-        self.assertNotIn("navigation_result", playwright)
+        candidates = web_search_subagent._materialize_context7_results_from_tool_outputs(
+            tool_outputs
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["docs_result"], "official docs body")
+        self.assertEqual(candidates[0]["resolve_result"], "resolved")
+        self.assertEqual(candidates[0]["source_name"], "context7")
+        self.assertEqual(candidates[0]["score_bucket"], "context7")
+        self.assertEqual(candidates[0]["snippet"], "")
+        self.assertEqual(candidates[0]["docs_result"], "official docs body")
+        self.assertEqual(candidates[0]["relevance_score"], 0.5)
 
     def test_keep_serpapi_top_n_after_score(self) -> None:
-        """打分后仅按综合分保留 SerpAPI top N，Tavily 结果不受影响。"""
+        """打分后仅按 score 保留 SerpAPI top N。"""
 
         result = {
             "results": [
-                {
-                    "title": "Tavily",
-                    "url_or_path": "https://tavily.example/1",
-                    "snippet": "tavily",
-                    "source_name": "tavily",
-                    "relevance_score": 0.5,
-                    "answer_coverage_score": 0.5,
-                    "source_confidence_score": 0.5,
-                    "freshness_score": 0.5,
-                    "score_reason": "tavily",
-                },
                 {
                     "title": "Serp Low",
                     "url_or_path": "https://example.com/low",
@@ -314,127 +364,116 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             "web_hitl_required": False,
             "hitl_reason": None,
         }
+        result = web_search_subagent._attach_serpapi_composite_scores(result)
 
         with patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_KEEP_TOP_N": "2"}):
             kept = web_search_subagent._keep_serpapi_top_n_after_score(result)
 
         titles = [item["title"] for item in kept["results"]]
-        self.assertEqual(titles, ["Tavily", "Serp High", "Serp Mid"])
+        self.assertEqual(titles, ["Serp High", "Serp Mid"])
+        self.assertIn("score", kept["results"][0])
 
-    def test_serpapi_top1_fetch_skipped_when_question_passes(self) -> None:
-        """问题整体分达标时不抓取 SerpAPI 正文。"""
+    def test_resolve_fetch_url_uses_llm_decision_when_relevance_passes(self) -> None:
+        """LLM 要求抓取且 URL 合法、relevance 超阈值时返回该 URL。"""
 
         result = {
+            "needs_page_fetch": True,
+            "fetch_url": "https://example.com/high",
+            "fetch_reason": "缺少条款全文",
             "results": [
                 {
                     "title": "Serp High",
+                    "url": "https://example.com/high",
                     "url_or_path": "https://example.com/high",
                     "snippet": "high",
                     "source_name": "serpapi",
-                    "relevance_score": 0.9,
-                    "answer_coverage_score": 0.9,
-                    "source_confidence_score": 0.9,
-                    "freshness_score": 0.9,
-                    "score_reason": "high",
-                }
-            ]
-        }
-
-        with patch.dict(
-            "os.environ",
-            {
-                "WEB_SEARCH_QUESTION_PASS_SCORE": "0.75",
-                "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7",
-            },
-        ):
-            self.assertIsNone(web_search_subagent._serpapi_top1_fetch_url(result))
-
-    def test_serpapi_top1_fetch_when_overall_low_and_top1_high(self) -> None:
-        """整体分未达标且 SerpAPI top1（relevance/confidence）够高时返回抓取 URL。"""
-
-        result = {
-            "results": [
-                {
-                    "title": "Weak",
-                    "url_or_path": "https://example.com/weak",
-                    "snippet": "weak",
-                    "source_name": "tavily",
-                    "relevance_score": 0.2,
-                    "answer_coverage_score": 0.2,
-                    "source_confidence_score": 0.2,
-                    "freshness_score": 0.2,
-                    "score_reason": "weak",
-                },
-                {
-                    "title": "Serp High",
-                    "url_or_path": "https://example.com/high",
-                    "snippet": "high",
-                    "source_name": "serpapi",
-                    "relevance_score": 0.9,
+                    "relevance_score": 0.81,
                     "answer_coverage_score": 0.1,
-                    "source_confidence_score": 0.8,
+                    "source_confidence_score": 0.1,
                     "freshness_score": 0.1,
-                    "score_reason": "high gate",
-                },
-            ]
+                    "score_reason": "high relevance",
+                    "score": 0.3,
+                }
+            ],
         }
 
-        with patch.dict(
-            "os.environ",
-            {
-                "WEB_SEARCH_QUESTION_PASS_SCORE": "0.75",
-                "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7",
-            },
-        ):
+        with patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7"}):
             self.assertEqual(
-                web_search_subagent._serpapi_top1_fetch_url(result),
+                web_search_subagent._resolve_serpapi_fetch_url(result),
                 "https://example.com/high",
             )
 
-    def test_serpapi_top1_fetch_ignores_coverage_and_freshness(self) -> None:
-        """top1 门槛只看 relevance/confidence，综合分高但两分低时不抓取。"""
+    def test_resolve_fetch_url_vetoes_low_relevance(self) -> None:
+        """LLM 要求抓取但 relevance 未超阈值时应否决。"""
 
         result = {
+            "needs_page_fetch": True,
+            "fetch_url": "https://example.com/edge",
+            "fetch_reason": "想看正文",
             "results": [
                 {
-                    "title": "Serp Composite High",
-                    "url_or_path": "https://example.com/composite",
-                    "snippet": "composite",
+                    "title": "Serp Edge",
+                    "url_or_path": "https://example.com/edge",
+                    "snippet": "edge",
                     "source_name": "serpapi",
-                    "relevance_score": 0.4,
-                    "answer_coverage_score": 1.0,
-                    "source_confidence_score": 0.4,
-                    "freshness_score": 1.0,
-                    "score_reason": "coverage heavy",
+                    "relevance_score": 0.7,
+                    "answer_coverage_score": 0.9,
+                    "source_confidence_score": 0.9,
+                    "freshness_score": 0.9,
+                    "score_reason": "equal threshold",
+                    "score": 0.8,
                 }
-            ]
+            ],
         }
 
-        with patch.dict(
-            "os.environ",
-            {
-                "WEB_SEARCH_QUESTION_PASS_SCORE": "0.95",
-                "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7",
-            },
-        ):
-            self.assertIsNone(web_search_subagent._serpapi_top1_fetch_url(result))
+        with patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7"}):
+            self.assertIsNone(web_search_subagent._resolve_serpapi_fetch_url(result))
 
-    def test_maybe_fetch_serpapi_page_and_enrich(self) -> None:
-        """条件满足时应抓取 top1 正文并由代码写入该条，不二次汇总。"""
+    def test_resolve_fetch_url_respects_llm_false(self) -> None:
+        """LLM 明确不抓时，即使高 relevance 也不抓。"""
 
-        tool_outputs = [{"tool_name": "serp_api_search", "ok": True}]
-        first_result = {
+        result = {
+            "needs_page_fetch": False,
+            "fetch_url": None,
+            "fetch_reason": "snippet 已够",
             "results": [
                 {
-                    "title": "Weak",
-                    "url_or_path": "https://example.com/weak",
-                    "snippet": "weak",
-                    "source_name": "tavily",
-                    "relevance_score": 0.2,
+                    "title": "Serp High",
+                    "url_or_path": "https://example.com/high",
+                    "snippet": "enough",
+                    "source_name": "serpapi",
+                    "relevance_score": 0.95,
+                    "answer_coverage_score": 0.9,
+                    "source_confidence_score": 0.9,
+                    "freshness_score": 0.9,
+                    "score_reason": "enough",
+                    "score": 0.9,
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7"}):
+            self.assertIsNone(web_search_subagent._resolve_serpapi_fetch_url(result))
+
+    def test_resolve_fetch_url_falls_back_when_fetch_url_invalid(self) -> None:
+        """LLM 要求抓取但 fetch_url 非法时，回退到最高 relevance。"""
+
+        result = {
+            "needs_page_fetch": True,
+            "fetch_url": "https://evil.example/not-in-results",
+            "fetch_reason": "缺数字",
+            "results": [
+                {
+                    "title": "Serp Mid",
+                    "url_or_path": "https://example.com/mid",
+                    "snippet": "mid",
+                    "source_name": "serpapi",
+                    "relevance_score": 0.75,
                     "answer_coverage_score": 0.2,
-                    "source_confidence_score": 0.2,
-                    "freshness_score": 0.2,
-                    "score_reason": "weak",
+                    "source_confidence_score": 0.5,
+                    "freshness_score": 0.5,
+                    "score_reason": "mid",
+                    "score": 0.5,
                 },
                 {
                     "title": "Serp High",
@@ -442,11 +481,43 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "snippet": "high",
                     "source_name": "serpapi",
                     "relevance_score": 0.9,
+                    "answer_coverage_score": 0.2,
+                    "source_confidence_score": 0.5,
+                    "freshness_score": 0.5,
+                    "score_reason": "high",
+                    "score": 0.55,
+                },
+            ],
+        }
+
+        with patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7"}):
+            self.assertEqual(
+                web_search_subagent._resolve_serpapi_fetch_url(result),
+                "https://example.com/high",
+            )
+
+    def test_maybe_fetch_serpapi_page_writes_body(self) -> None:
+        """条件满足时应抓取正文并写入 body，保留原 snippet。"""
+
+        tool_outputs = [{"tool_name": "serp_api_search", "ok": True}]
+        first_result = {
+            "needs_page_fetch": True,
+            "fetch_url": "https://example.com/high",
+            "fetch_reason": "缺长文细节",
+            "results": [
+                {
+                    "title": "Serp High",
+                    "url": "https://example.com/high",
+                    "url_or_path": "https://example.com/high",
+                    "snippet": "original snippet",
+                    "source_name": "serpapi",
+                    "relevance_score": 0.9,
                     "answer_coverage_score": 0.1,
-                    "source_confidence_score": 0.8,
+                    "source_confidence_score": 0.1,
                     "freshness_score": 0.1,
                     "score_reason": "high",
-                },
+                    "score": 0.3,
+                }
             ],
             "web_hitl_required": False,
             "hitl_reason": None,
@@ -471,13 +542,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                 web_search_subagent,
                 "_summarize_web_tool_outputs",
             ) as summarize,
-            patch.dict(
-                "os.environ",
-                {
-                    "WEB_SEARCH_QUESTION_PASS_SCORE": "0.75",
-                    "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7",
-                },
-            ),
+            patch.dict("os.environ", {"WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE": "0.7"}),
         ):
             updated_outputs, updated_result = (
                 web_search_subagent._maybe_fetch_serpapi_page_and_enrich(
@@ -489,11 +554,49 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         call_tool.assert_called_once()
         summarize.assert_not_called()
         self.assertEqual(len(updated_outputs), 2)
-        serp_item = updated_result["results"][1]
+        serp_item = updated_result["results"][0]
         self.assertEqual(serp_item["title"], "Page Title")
-        self.assertEqual(serp_item["snippet"], "完整页面正文内容")
-        self.assertEqual(serp_item["relevance_score"], 0.9)
-        self.assertEqual(updated_result["results"][0]["snippet"], "weak")
+        self.assertEqual(serp_item["snippet"], "original snippet")
+        self.assertEqual(serp_item["body"], "完整页面正文内容")
+
+    def test_merge_dedupes_same_url_preferring_body(self) -> None:
+        """合并时同 URL 去重，优先保留含 body 的候选。"""
+
+        merged = web_search_subagent._merge_code_materialized_candidates(
+            {
+                "results": [
+                    {
+                        "title": "Serp",
+                        "url": "https://example.com/same",
+                        "url_or_path": "https://example.com/same",
+                        "snippet": "short",
+                        "source_name": "serpapi",
+                        "relevance_score": 0.9,
+                        "score": 0.8,
+                    }
+                ],
+                "web_hitl_required": False,
+                "hitl_reason": None,
+            },
+            tavily_candidates=[
+                {
+                    "title": "Tavily",
+                    "url": "https://example.com/same/",
+                    "url_or_path": "https://example.com/same/",
+                    "snippet": "tavily snippet",
+                    "body": "full body text",
+                    "source_name": "tavily",
+                    "relevance_score": 0.7,
+                    "score": 0.7,
+                }
+            ],
+            context7_candidates=[],
+            playwright_candidates=[],
+        )
+
+        self.assertEqual(len(merged["results"]), 1)
+        self.assertEqual(merged["results"][0]["source_name"], "tavily")
+        self.assertEqual(merged["results"][0]["body"], "full body text")
 
     def test_dispatch_does_not_call_external_worker_in_web_search(self) -> None:
         """Web Search 工具池不包含 Claude 或 Codex。"""

@@ -1,13 +1,12 @@
 """Web Search SubAgent 工具。
 
-当前实现采用“确定性调度 + LLM 汇总打分 + 条件正文抓取”：
-- 不再使用内部 `create_agent` ReAct 循环，避免工具自由循环和重复 trace。
-- 只调度 SerpAPI / Tavily / Context7 / headless Playwright 页面读取工具。
-- SerpAPI 按 NUM 取回后全部进入汇总打分，再按 KEEP_TOP_N 保留；Tavily 仅由 MAX_RESULTS 控制。
-- SerpAPI 结果页正文抓取发生在首次汇总打分之后：问题整体分达标则跳过；
-  未达标且 SerpAPI top1（仅看 relevance / source_confidence）够高时抓取正文，
-  并由代码写入该条候选，不再二次汇总打分。
-- 进入汇总 LLM 前压缩 tool_outputs，原始输出仍用于评测记录。
+当前实现采用“分流物化 + 仅 SerpAPI 进汇总 LLM + 代码合并”：
+- Tavily：保留自带 score，代码物化，不进汇总 LLM。
+- Context7：官方文档不打搜索相关性分，代码保留 docs_result/resolve_result，不进汇总 LLM。
+- SerpAPI：压缩后进汇总 LLM 打四维分并判断是否抓正文；代码写入综合 score、keep top N，
+  再按 LLM 主决策 + 硬分否决/兜底可选 Playwright 写 body。
+- Playwright：query URL 由代码物化；Serp 结果页抓取不二次进汇总 LLM。
+- 最终由代码合并各来源候选，并按规范化 URL 去重。
 - 不包含 DevTools；DevTools 只属于 Web HITL 节点。
 - 不包含 Claude Code / Codex；外部 Agent worker 只属于 strategy_iteration。
 """
@@ -46,13 +45,19 @@ WEB_SOURCE_TYPES = {
     "product_directory",
     "traffic_data",
 }
+DEFAULT_TAVILY_SOURCE_CONFIDENCE = 0.65
+DEFAULT_TAVILY_FRESHNESS_WITHOUT_DATE = 0.5
+DEFAULT_TAVILY_FRESHNESS_WITH_DATE = 0.7
+DEFAULT_CONTEXT7_SOURCE_CONFIDENCE = 0.95
+DEFAULT_CONTEXT7_RELEVANCE = 0.5
+DEFAULT_CONTEXT7_COVERAGE = 0.5
+DEFAULT_CONTEXT7_FRESHNESS = 0.7
 URL_PATTERN = re.compile(r"https?://[^\s]+")
 DEFAULT_SERPAPI_NUM = 5
 DEFAULT_SERPAPI_KEEP_TOP_N = 3
 DEFAULT_TAVILY_MAX_RESULTS = 5
 DEFAULT_CONTEXT7_MAX_CHARS = 4000
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 3000
-DEFAULT_QUESTION_PASS_SCORE = 0.75
 DEFAULT_SERPAPI_TOP1_HIGH_SCORE = 0.7
 _TOOL_CONCURRENCY_LIMITS = {
     "serp_api_search": 3,
@@ -160,19 +165,8 @@ def _playwright_max_chars() -> int:
     )
 
 
-def _question_pass_score() -> float:
-    """单个 Web 问题汇总后的通过分阈值。"""
-
-    return _read_bounded_float_env(
-        "WEB_SEARCH_QUESTION_PASS_SCORE",
-        default=DEFAULT_QUESTION_PASS_SCORE,
-        minimum=0.0,
-        maximum=1.0,
-    )
-
-
 def _serpapi_top1_high_score() -> float:
-    """触发 SerpAPI top1 正文抓取的门槛分（relevance/confidence 均值）。"""
+    """触发 SerpAPI top1 正文抓取的 relevance 阈值（需严格大于）。"""
 
     return _read_bounded_float_env(
         "WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE",
@@ -325,26 +319,15 @@ def _score_or_default(value: Any, default: float) -> float:
 
 
 def _candidate_composite_score(item: dict[str, Any]) -> float:
-    """计算单条候选综合分，与证据层可靠性权重一致。"""
+    """计算单条候选综合分。"""
 
+    if item.get("score") is not None:
+        return _score_or_default(item.get("score"), 0.0)
     return round(
         _score_or_default(item.get("source_confidence_score"), 0.5) * 0.35
         + _score_or_default(item.get("freshness_score"), 0.5) * 0.15
         + _score_or_default(item.get("relevance_score"), 0.5) * 0.3
         + _score_or_default(item.get("answer_coverage_score"), 0.5) * 0.2,
-        4,
-    )
-
-
-def _serpapi_top1_gate_score(item: dict[str, Any]) -> float:
-    """SerpAPI top1 门槛分：仅看 relevance 与 source_confidence。"""
-
-    return round(
-        (
-            _score_or_default(item.get("relevance_score"), 0.0)
-            + _score_or_default(item.get("source_confidence_score"), 0.0)
-        )
-        / 2.0,
         4,
     )
 
@@ -356,21 +339,44 @@ def _is_serpapi_result(item: dict[str, Any]) -> bool:
     return "serp" in source_name
 
 
-def _question_overall_score(result: dict[str, Any]) -> float:
-    """问题整体分：全部候选综合分均值。"""
+def _attach_serpapi_composite_scores(result: dict[str, Any]) -> dict[str, Any]:
+    """为 SerpAPI 候选写入综合 score，并规范 url 字段。"""
 
-    scores = [
-        _candidate_composite_score(item)
-        for item in result.get("results", [])
-        if isinstance(item, dict)
-    ]
-    if not scores:
-        return 0.0
-    return round(sum(scores) / len(scores), 4)
+    updated: list[Any] = []
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            updated.append(item)
+            continue
+        normalized = dict(item)
+        if _is_serpapi_result(normalized):
+            score = round(
+                _score_or_default(normalized.get("source_confidence_score"), 0.5) * 0.35
+                + _score_or_default(normalized.get("freshness_score"), 0.5) * 0.15
+                + _score_or_default(normalized.get("relevance_score"), 0.5) * 0.3
+                + _score_or_default(normalized.get("answer_coverage_score"), 0.5) * 0.2,
+                4,
+            )
+            normalized["score"] = score
+            url = normalized.get("url") or normalized.get("url_or_path")
+            if isinstance(url, str):
+                normalized["url"] = url
+                normalized["url_or_path"] = url
+            normalized["score_bucket"] = "serpapi"
+            normalized["scored_by"] = "serpapi_llm"
+            # HITL 字段由 Playwright 路径写入，汇总 LLM 不输出
+            normalized.setdefault("requires_login", False)
+            normalized.setdefault("blocked_reason", None)
+        updated.append(normalized)
+    return {
+        **result,
+        "results": updated,
+        "web_hitl_required": bool(result.get("web_hitl_required", False)),
+        "hitl_reason": result.get("hitl_reason"),
+    }
 
 
 def _keep_serpapi_top_n_after_score(result: dict[str, Any]) -> dict[str, Any]:
-    """汇总打分后仅对 SerpAPI 候选按综合分保留 top N。"""
+    """汇总打分后仅对 SerpAPI 候选按 score 保留 top N。"""
 
     results = result.get("results")
     if not isinstance(results, list):
@@ -398,44 +404,115 @@ def _keep_serpapi_top_n_after_score(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _serpapi_top1_fetch_url(result: dict[str, Any]) -> str | None:
-    """整体分未达标且 SerpAPI top1 门槛够高时，返回应抓取的 URL。"""
+def _normalize_candidate_url(value: Any) -> str | None:
+    """规范化候选 URL / 路径，供去重与抓取校验。"""
 
-    if _question_overall_score(result) >= _question_pass_score():
+    if not isinstance(value, str):
         return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.startswith(("http://", "https://")):
+        return normalized.rstrip("/")
+    return normalized
 
-    serp_results = [
+
+def _serpapi_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """提取结果中的 SerpAPI 候选。"""
+
+    return [
         item
         for item in result.get("results", [])
         if isinstance(item, dict) and _is_serpapi_result(item)
     ]
-    if not serp_results:
-        return None
 
-    top1 = max(serp_results, key=_serpapi_top1_gate_score)
-    if _serpapi_top1_gate_score(top1) < _serpapi_top1_high_score():
-        return None
 
-    url = top1.get("url_or_path")
-    if isinstance(url, str) and url.startswith(("http://", "https://")):
-        return url
+def _serpapi_item_by_url(
+    serp_results: list[dict[str, Any]],
+    url: str,
+) -> dict[str, Any] | None:
+    """按规范化 URL 查找 Serp 候选。"""
+
+    target = _normalize_candidate_url(url)
+    if target is None:
+        return None
+    for item in serp_results:
+        item_url = _normalize_candidate_url(item.get("url") or item.get("url_or_path"))
+        if item_url == target:
+            return item
     return None
 
 
-def _enrich_result_with_page_content(
+def _resolve_serpapi_fetch_url(result: dict[str, Any]) -> str | None:
+    """解析应抓取的 Serp 正文 URL。
+
+    主决策：LLM 的 needs_page_fetch + fetch_url。
+    否决：目标条 relevance_score 未严格大于阈值（合法 URL 被否决后不再改抓）。
+    兜底：LLM 要求抓取但 fetch_url 缺失/不在 keep 候选中时，
+    选 keep 后 relevance 最高且超阈值的一条。
+    """
+
+    serp_results = _serpapi_items(result)
+    if not serp_results:
+        return None
+
+    threshold = _serpapi_top1_high_score()
+    needs_page_fetch = bool(result.get("needs_page_fetch"))
+
+    def _passes_relevance_gate(item: dict[str, Any]) -> bool:
+        return _score_or_default(item.get("relevance_score"), 0.0) > threshold
+
+    def _http_url(item: dict[str, Any]) -> str | None:
+        url = item.get("url") or item.get("url_or_path")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+        return None
+
+    def _fallback_top_relevance() -> str | None:
+        top1 = max(
+            serp_results,
+            key=lambda item: _score_or_default(item.get("relevance_score"), 0.0),
+        )
+        if _passes_relevance_gate(top1):
+            return _http_url(top1)
+        return None
+
+    if needs_page_fetch:
+        fetch_url = result.get("fetch_url")
+        if isinstance(fetch_url, str) and fetch_url.strip():
+            matched = _serpapi_item_by_url(serp_results, fetch_url)
+            if matched is not None:
+                if _passes_relevance_gate(matched):
+                    return _http_url(matched)
+                # 合法 URL 但硬分否决：不再改抓其他页
+                return None
+            # fetch_url 不在 keep 候选中 → 兜底
+            return _fallback_top_relevance()
+        # 缺少 fetch_url → 兜底
+        return _fallback_top_relevance()
+
+    # LLM 明确不抓时，不以硬分为由主动抓取
+    if "needs_page_fetch" in result:
+        return None
+
+    # 汇总失败等未给出决策字段时：硬分兜底
+    return _fallback_top_relevance()
+
+
+def _enrich_result_with_page_body(
     result: dict[str, Any],
     *,
     fetch_url: str,
     page_output: dict[str, Any],
 ) -> dict[str, Any]:
-    """把 Playwright 抓取的正文确定性写入对应 SerpAPI 候选。"""
+    """把 Playwright 截断正文写入对应 SerpAPI 候选的 body，保留原 snippet。"""
 
     compact = _compact_playwright_output(
         page_output.get("output"),
         url=fetch_url,
     )
-    content = str(compact.get("content") or "").strip()
-    if not content:
+    body = str(compact.get("content") or "").strip()
+    if not body:
         return result
 
     page_title = compact.get("title")
@@ -444,20 +521,20 @@ def _enrich_result_with_page_content(
         if not isinstance(item, dict):
             updated_results.append(item)
             continue
-        if item.get("url_or_path") != fetch_url:
+        item_url = item.get("url") or item.get("url_or_path")
+        if item_url != fetch_url:
             updated_results.append(item)
             continue
         enriched = dict(item)
         if isinstance(page_title, str) and page_title.strip():
             enriched["title"] = page_title.strip()
-        enriched["snippet"] = content
+        enriched["body"] = body
         updated_results.append(enriched)
 
     return {
         **result,
         "results": updated_results,
     }
-
 
 @traceable(name="collect_web_tool_outputs", run_type="chain")
 def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
@@ -502,13 +579,175 @@ def _collect_web_tool_outputs(task: dict[str, Any]) -> list[dict[str, Any]]:
     return tool_outputs
 
 
+def _playwright_login_signal(tool_output: dict[str, Any]) -> str | None:
+    """从 Playwright 工具输出中确定性识别登录墙 / 验证码 / 权限墙。"""
+
+    text = " ".join(
+        [
+            _tool_output_text(tool_output.get("error")),
+            _tool_output_text(tool_output.get("output")),
+        ]
+    )
+    lowered = text.lower()
+    checks = (
+        ("验证码", "Playwright 检测到验证码墙"),
+        ("captcha", "Playwright 检测到验证码墙"),
+        ("登录", "Playwright 检测到登录墙"),
+        ("sign in", "Playwright 检测到登录墙"),
+        ("log in", "Playwright 检测到登录墙"),
+        ("login", "Playwright 检测到登录墙"),
+        ("权限", "Playwright 检测到权限墙"),
+        ("unauthorized", "Playwright 检测到权限墙"),
+        ("access denied", "Playwright 检测到权限墙"),
+    )
+    for keyword, reason in checks:
+        if keyword in lowered:
+            return reason
+    return None
+
+
+def _playwright_tool_url(tool_output: dict[str, Any]) -> str | None:
+    """提取 Playwright 工具调用对应的 URL。"""
+
+    input_payload = tool_output.get("input")
+    if isinstance(input_payload, dict):
+        maybe_url = input_payload.get("url")
+        if isinstance(maybe_url, str) and maybe_url.startswith(("http://", "https://")):
+            return maybe_url
+    output = _tool_output_as_dict(tool_output.get("output"))
+    maybe_url = output.get("url")
+    if isinstance(maybe_url, str) and maybe_url.startswith(("http://", "https://")):
+        return maybe_url
+    return None
+
+
+def _mark_result_requires_login(
+    result: dict[str, Any],
+    *,
+    url: str,
+    reason: str,
+) -> dict[str, Any]:
+    """把指定 URL 的候选标为需要登录 HITL。"""
+
+    updated: list[Any] = []
+    matched = False
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            updated.append(item)
+            continue
+        item_url = item.get("url") or item.get("url_or_path")
+        if item_url != url:
+            updated.append(item)
+            continue
+        enriched = dict(item)
+        enriched["requires_login"] = True
+        enriched["blocked_reason"] = reason
+        enriched["playwright_hitl"] = True
+        updated.append(enriched)
+        matched = True
+    if not matched:
+        updated.append(
+            {
+                "title": url,
+                "url": url,
+                "url_or_path": url,
+                "snippet": "",
+                "published_at": None,
+                "source_name": "playwright",
+                "requires_login": True,
+                "blocked_reason": reason,
+                "playwright_hitl": True,
+                "relevance_score": 0.0,
+                "answer_coverage_score": 0.0,
+                "source_confidence_score": 0.3,
+                "freshness_score": 0.3,
+                "score_reason": reason,
+            }
+        )
+    return {**result, "results": updated}
+
+
+def _strip_non_playwright_hitl_claims(result: dict[str, Any]) -> dict[str, Any]:
+    """清除非 Playwright 路径提出的 HITL 声明（如 Serp 汇总 LLM）。"""
+
+    updated: list[Any] = []
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            updated.append(item)
+            continue
+        cleaned = dict(item)
+        if not cleaned.get("playwright_hitl"):
+            cleaned["requires_login"] = False
+        updated.append(cleaned)
+    return {
+        **result,
+        "results": updated,
+        "web_hitl_required": False,
+        "hitl_reason": None,
+    }
+
+
+def _finalize_playwright_only_hitl(
+    tool_outputs: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """仅根据 Playwright 登录墙信号设置 Web HITL。"""
+
+    cleared = _strip_non_playwright_hitl_claims(result)
+    updated = cleared
+    for tool_output in tool_outputs:
+        tool_name = str(tool_output.get("tool_name") or "")
+        if not tool_name.startswith("playwright_mcp_fetch"):
+            continue
+        reason = _playwright_login_signal(tool_output)
+        if reason is None:
+            # 成功抓到的正文里也可能是登录页
+            compact = _compact_playwright_output(
+                tool_output.get("output"),
+                url=_playwright_tool_url(tool_output),
+            )
+            body_signal = _playwright_login_signal(
+                {
+                    "error": None,
+                    "output": {"content": compact.get("content")},
+                }
+            )
+            reason = body_signal
+        if reason is None:
+            continue
+        url = _playwright_tool_url(tool_output)
+        if url is None:
+            continue
+        updated = _mark_result_requires_login(updated, url=url, reason=reason)
+
+    login_items = [
+        item
+        for item in updated.get("results", [])
+        if isinstance(item, dict) and item.get("requires_login")
+    ]
+    if not login_items:
+        return {
+            **updated,
+            "web_hitl_required": False,
+            "hitl_reason": None,
+        }
+    return {
+        **updated,
+        "web_hitl_required": True,
+        "hitl_reason": str(
+            login_items[0].get("blocked_reason")
+            or "Playwright 检测到登录/验证码/权限墙"
+        ),
+    }
+
+
 def _maybe_fetch_serpapi_page_and_enrich(
     tool_outputs: list[dict[str, Any]],
     result: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """打分后按阈值条件抓取 SerpAPI top1 正文，并由代码写入该条候选。"""
+    """按 LLM 抓正文决策（硬分否决/兜底）抓取 SerpAPI 正文，写入 body。"""
 
-    fetch_url = _serpapi_top1_fetch_url(result)
+    fetch_url = _resolve_serpapi_fetch_url(result)
     if fetch_url is None:
         return tool_outputs, result
 
@@ -518,14 +757,40 @@ def _maybe_fetch_serpapi_page_and_enrich(
         {"url": fetch_url},
     )
     updated_outputs = [*tool_outputs, page_output]
+    login_reason = _playwright_login_signal(page_output)
+    if login_reason is not None:
+        marked = _mark_result_requires_login(
+            result,
+            url=fetch_url,
+            reason=login_reason,
+        )
+        return updated_outputs, marked
     if not page_output.get("ok"):
         return updated_outputs, result
 
-    enriched = _enrich_result_with_page_content(
+    enriched = _enrich_result_with_page_body(
         result,
         fetch_url=fetch_url,
         page_output=page_output,
     )
+    body_login = None
+    for item in enriched.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        if _normalize_candidate_url(
+            item.get("url") or item.get("url_or_path")
+        ) != _normalize_candidate_url(fetch_url):
+            continue
+        body_login = _playwright_login_signal(
+            {"error": None, "output": {"content": item.get("body")}}
+        )
+        break
+    if body_login is not None:
+        enriched = _mark_result_requires_login(
+            enriched,
+            url=fetch_url,
+            reason=body_login,
+        )
     return updated_outputs, enriched
 
 
@@ -583,6 +848,321 @@ def _extract_tavily_result_items(output: Any) -> list[Any]:
     return []
 
 
+def _materialize_tavily_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
+    """把单条 Tavily 结果确定性转为候选，保留原始 score。"""
+
+    url = item.get("url") or item.get("link") or item.get("url_or_path")
+    title = item.get("title")
+    snippet = item.get("content") or item.get("snippet") or item.get("description")
+    if not (
+        isinstance(title, str)
+        and title.strip()
+        and isinstance(url, str)
+        and url.startswith(("http://", "https://"))
+        and isinstance(snippet, str)
+        and snippet.strip()
+    ):
+        return None
+
+    score = _score_or_default(item.get("score"), 0.5)
+    published_at = (
+        item.get("published_at") or item.get("date") or item.get("published_date")
+    )
+    freshness = (
+        DEFAULT_TAVILY_FRESHNESS_WITH_DATE
+        if published_at
+        else DEFAULT_TAVILY_FRESHNESS_WITHOUT_DATE
+    )
+    return {
+        "title": title.strip(),
+        "score": score,
+        "url": url,
+        "url_or_path": url,
+        "snippet": snippet.strip(),
+        "published_at": published_at,
+        "source_name": "tavily",
+        "requires_login": False,
+        "blocked_reason": None,
+        "relevance_score": score,
+        "answer_coverage_score": score,
+        "source_confidence_score": DEFAULT_TAVILY_SOURCE_CONFIDENCE,
+        "freshness_score": freshness,
+        "score_reason": f"Tavily 相关性 score={score}",
+        "tavily_score": score,
+        "score_bucket": "tavily",
+        "scored_by": "tavily_provider",
+    }
+
+
+def _materialize_tavily_results_from_tool_outputs(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从原始工具输出确定性提取 Tavily 候选。"""
+
+    candidates: list[dict[str, Any]] = []
+    for tool_output in tool_outputs:
+        if tool_output.get("tool_name") != "tavily_mcp_search":
+            continue
+        if not tool_output.get("ok"):
+            continue
+        for item in _extract_tavily_result_items(tool_output.get("output")):
+            if not isinstance(item, dict):
+                continue
+            candidate = _materialize_tavily_candidate(item)
+            if candidate is not None:
+                candidates.append(candidate)
+    return candidates
+
+
+def _parse_context7_payload(output: Any) -> dict[str, Any]:
+    """解析 Context7 工具输出中的 docs/resolve 字段。"""
+
+    output_dict = _tool_output_as_dict(output)
+    raw_result = output_dict.get("raw_result")
+    parsed: dict[str, Any] = {}
+    if isinstance(raw_result, str):
+        try:
+            maybe = json.loads(raw_result)
+        except json.JSONDecodeError:
+            maybe = None
+        if isinstance(maybe, dict):
+            parsed = maybe
+    elif isinstance(raw_result, dict):
+        parsed = raw_result
+    if not parsed:
+        parsed = output_dict
+    return {
+        "library_id": parsed.get("library_id") or output_dict.get("library_id"),
+        "resolve_result": parsed.get("resolve_result") or output_dict.get("resolve_result"),
+        "docs_result": (
+            parsed.get("docs_result")
+            or output_dict.get("docs_result")
+            or parsed.get("docs")
+            or output_dict.get("docs")
+            or raw_result
+        ),
+    }
+
+
+def _materialize_context7_results_from_tool_outputs(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Context7 官方文档不打分，直接保留 docs_result / resolve_result。"""
+
+    candidates: list[dict[str, Any]] = []
+    for tool_output in tool_outputs:
+        if tool_output.get("tool_name") != "context7_mcp_query":
+            continue
+        if not tool_output.get("ok"):
+            continue
+        payload = _parse_context7_payload(tool_output.get("output"))
+        docs_result = _truncate_text(payload.get("docs_result"), _context7_max_chars())
+        resolve_result = _truncate_text(
+            payload.get("resolve_result"),
+            max(500, _context7_max_chars() // 4),
+        )
+        if not docs_result and not resolve_result:
+            continue
+        library_id = payload.get("library_id") or "context7"
+        candidates.append(
+            {
+                "title": f"Context7 {library_id}",
+                "url": str(library_id),
+                "url_or_path": str(library_id),
+                "snippet": "",
+                "published_at": None,
+                "source_name": "context7",
+                "library_id": library_id,
+                "docs_result": docs_result,
+                "resolve_result": resolve_result,
+                "requires_login": False,
+                "blocked_reason": None,
+                "relevance_score": DEFAULT_CONTEXT7_RELEVANCE,
+                "answer_coverage_score": DEFAULT_CONTEXT7_COVERAGE,
+                "source_confidence_score": DEFAULT_CONTEXT7_SOURCE_CONFIDENCE,
+                "freshness_score": DEFAULT_CONTEXT7_FRESHNESS,
+                "score_reason": "Context7 官方文档，不经 summarize LLM 打分；证据层按权威加权分桶。",
+                "score_bucket": "context7",
+                "scored_by": "context7_authority",
+            }
+        )
+    return candidates
+
+
+def _materialize_query_url_playwright_results(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """query 含 URL 时的 Playwright 抓取结果，由代码物化为带 body 的候选。"""
+
+    candidates: list[dict[str, Any]] = []
+    for tool_output in tool_outputs:
+        if tool_output.get("tool_name") != "playwright_mcp_fetch_page":
+            continue
+        input_payload = tool_output.get("input")
+        url = None
+        if isinstance(input_payload, dict):
+            maybe_url = input_payload.get("url")
+            if isinstance(maybe_url, str):
+                url = maybe_url
+        login_reason = _playwright_login_signal(tool_output)
+        page_url = url
+        if isinstance(page_url, str) and page_url.startswith(("http://", "https://")):
+            if login_reason is not None:
+                candidates.append(
+                    {
+                        "title": page_url,
+                        "url": page_url,
+                        "url_or_path": page_url,
+                        "snippet": "",
+                        "published_at": None,
+                        "source_name": "playwright",
+                        "requires_login": True,
+                        "blocked_reason": login_reason,
+                        "playwright_hitl": True,
+                        "relevance_score": 0.0,
+                        "answer_coverage_score": 0.0,
+                        "source_confidence_score": 0.3,
+                        "freshness_score": 0.3,
+                        "score_reason": login_reason,
+                    }
+                )
+                continue
+        if not tool_output.get("ok"):
+            continue
+        compact = _compact_playwright_output(tool_output.get("output"), url=url)
+        body = str(compact.get("content") or "").strip()
+        page_url = compact.get("url") or url
+        if not isinstance(page_url, str) or not page_url.startswith(("http://", "https://")):
+            continue
+        body_login = _playwright_login_signal(
+            {"error": None, "output": {"content": body}}
+        )
+        if body_login is not None:
+            candidates.append(
+                {
+                    "title": compact.get("title") or page_url,
+                    "url": page_url,
+                    "url_or_path": page_url,
+                    "snippet": "",
+                    "body": body,
+                    "published_at": None,
+                    "source_name": "playwright",
+                    "requires_login": True,
+                    "blocked_reason": body_login,
+                    "playwright_hitl": True,
+                    "relevance_score": 0.0,
+                    "answer_coverage_score": 0.0,
+                    "source_confidence_score": 0.3,
+                    "freshness_score": 0.3,
+                    "score_reason": body_login,
+                }
+            )
+            continue
+        if not body:
+            continue
+        title = compact.get("title") or page_url
+        candidates.append(
+            {
+                "title": str(title),
+                "url": page_url,
+                "url_or_path": page_url,
+                "snippet": body[:500],
+                "body": body,
+                "published_at": None,
+                "source_name": "playwright",
+                "requires_login": False,
+                "blocked_reason": None,
+                "relevance_score": 0.7,
+                "answer_coverage_score": 0.7,
+                "source_confidence_score": 0.7,
+                "freshness_score": 0.5,
+                "score_reason": "query URL Playwright 正文，由代码物化。",
+                "score_bucket": "playwright",
+                "scored_by": "playwright_code",
+            }
+        )
+    return candidates
+
+
+def _candidate_richness_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """同 URL 去重时的保留优先级：body > 更高分 > 更长正文/摘要。"""
+
+    body = item.get("body")
+    docs = item.get("docs_result")
+    snippet = item.get("snippet") or ""
+    body_len = len(body) if isinstance(body, str) else 0
+    docs_len = len(docs) if isinstance(docs, str) else 0
+    snippet_len = len(snippet) if isinstance(snippet, str) else 0
+    has_body = 1 if body_len > 0 else 0
+    score = _candidate_composite_score(item)
+    source_rank = {
+        "playwright": 4,
+        "serpapi": 3,
+        "tavily": 2,
+        "context7": 1,
+    }.get(str(item.get("source_name") or "").lower(), 0)
+    return (has_body, score, body_len + docs_len, snippet_len, source_rank)
+
+
+def _dedupe_candidates_by_url(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按规范化 URL/路径去重，保留更完整的候选并维持首次出现顺序。"""
+
+    best_by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        key = _normalize_candidate_url(item.get("url_or_path") or item.get("url"))
+        if key is None:
+            # 无 URL 的候选各自保留
+            synthetic = f"__no_url__{len(order)}"
+            best_by_key[synthetic] = item
+            order.append(synthetic)
+            continue
+        existing = best_by_key.get(key)
+        if existing is None:
+            best_by_key[key] = item
+            order.append(key)
+            continue
+        if _candidate_richness_key(item) > _candidate_richness_key(existing):
+            best_by_key[key] = item
+    return [best_by_key[key] for key in order]
+
+
+def _merge_code_materialized_candidates(
+    serp_result: dict[str, Any],
+    *,
+    tavily_candidates: list[dict[str, Any]],
+    context7_candidates: list[dict[str, Any]],
+    playwright_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """由代码合并各来源候选，并按 URL 去重。"""
+
+    serp_results = [
+        item for item in serp_result.get("results", []) if isinstance(item, dict)
+    ]
+    merged = [
+        *tavily_candidates,
+        *context7_candidates,
+        *playwright_candidates,
+        *serp_results,
+    ]
+    return {
+        **serp_result,
+        "results": _dedupe_candidates_by_url(merged),
+    }
+
+
+def _tool_outputs_for_summarize(
+    tool_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """汇总 LLM 只接收 SerpAPI 工具输出。"""
+
+    return [
+        item
+        for item in tool_outputs
+        if item.get("tool_name") == "serp_api_search"
+    ]
 def _compact_playwright_output(output: Any, *, url: str | None) -> dict[str, Any]:
     """压缩 Playwright 输出，只保留 url / title / 截断正文。"""
 
@@ -683,25 +1263,6 @@ def _compact_tool_output_for_summarize(tool_output: dict[str, Any]) -> dict[str,
         }
         return compact
 
-    if tool_name == "tavily_mcp_search":
-        items = _extract_tavily_result_items(output)
-        compact_results = []
-        for item in items:
-            compacted = _compact_search_result_item(item)
-            if compacted is not None:
-                compact_results.append(compacted)
-        if compact_results:
-            compact["output"] = {
-                "provider": "tavily_mcp",
-                "results": compact_results,
-            }
-        else:
-            compact["output"] = {
-                "provider": "tavily_mcp",
-                "docs": _truncate_text(output, _context7_max_chars()),
-            }
-        return compact
-
     if tool_name == "context7_mcp_query":
         compact["output"] = _compact_context7_output(output)
         return compact
@@ -723,10 +1284,12 @@ def _compact_tool_output_for_summarize(tool_output: dict[str, Any]) -> dict[str,
 def _compact_tool_outputs_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """压缩全部工具输出后再交给汇总 LLM。"""
+    """压缩非 Tavily 工具输出后再交给汇总 LLM。"""
 
-    return [_compact_tool_output_for_summarize(item) for item in tool_outputs]
-
+    return [
+        _compact_tool_output_for_summarize(item)
+        for item in _tool_outputs_for_summarize(tool_outputs)
+    ]
 
 def _tool_output_as_dict(value: Any) -> dict[str, Any]:
     """把工具输出转换为便于确定性检查的字典。"""
@@ -903,16 +1466,23 @@ def _fallback_result_from_tool_outputs(
                         "source_confidence_score": 0.6,
                         "freshness_score": 0.5,
                         "score_reason": "LLM 汇总失败时由 SerpAPI 首条结果生成的候选分，可信度较低。",
+                        "score": 0.545,
                     }
                 ],
+                "needs_page_fetch": False,
+                "fetch_url": None,
+                "fetch_reason": "LLM 汇总失败，跳过抓正文决策。",
                 "web_hitl_required": False,
                 "hitl_reason": None,
             }
 
     return {
         "results": [],
-        "web_hitl_required": True,
-        "hitl_reason": "没有可用 Web 搜索结果，需要检查 SERPAPI_API_KEY、Tavily/Context7 配置或人工介入。",
+        "needs_page_fetch": False,
+        "fetch_url": None,
+        "fetch_reason": None,
+        "web_hitl_required": False,
+        "hitl_reason": None,
     }
 
 
@@ -922,44 +1492,21 @@ def _has_usable_web_result(result: dict[str, Any]) -> bool:
     for item in result.get("results", []):
         if not isinstance(item, dict):
             continue
-        url_or_path = item.get("url_or_path")
-        snippet = item.get("snippet")
+        url_or_path = item.get("url_or_path") or item.get("url")
+        snippet = item.get("snippet") or item.get("body") or item.get("docs_result")
         requires_login = item.get("requires_login")
         if (
             isinstance(url_or_path, str)
-            and url_or_path.startswith(("http://", "https://"))
+            and (
+                url_or_path.startswith(("http://", "https://"))
+                or item.get("source_name") == "context7"
+            )
             and isinstance(snippet, str)
             and snippet.strip()
             and not requires_login
         ):
             return True
     return False
-
-
-def _normalize_web_hitl_decision(result: dict[str, Any]) -> dict[str, Any]:
-    """避免把普通页面抓取失败误升级为 HITL。
-
-    SerpAPI / Tavily 的标题、URL、摘要可以先作为候选证据进入后续证据评分；
-    页面正文 403、about:blank 或超时只应降低证据可信度，不应默认要求人工接管。
-    真正的登录墙、验证码和权限确认仍保留 HITL。
-    """
-
-    if not result.get("web_hitl_required") or not _has_usable_web_result(result):
-        return result
-
-    reason = str(result.get("hitl_reason") or "")
-    hard_hitl_keywords = ("登录", "验证码", "captcha", "login", "sign in")
-    if any(keyword in reason.lower() for keyword in hard_hitl_keywords):
-        return result
-
-    return {
-        **result,
-        "web_hitl_required": False,
-        "hitl_reason": (
-            reason
-            + "；已降级为候选证据处理：页面正文抓取失败不再单独触发 HITL。"
-        ).lstrip("；"),
-    }
 
 
 @traceable(name="summarize_web_tool_outputs", run_type="llm")
@@ -1000,13 +1547,17 @@ def _summarize_web_tool_outputs(
 
 @tool("web_search_subagent_tool")
 def web_search_subagent_tool(task_json: str) -> str:
-    """确定性调度 Web 工具，汇总打分后再按阈值条件抓取正文。"""
+    """分流物化各工具结果；仅 SerpAPI 经汇总 LLM 打分后由代码合并。"""
 
     payload = json.loads(task_json)
     task = payload["task"] if "task" in payload else payload
     tool_outputs = _collect_web_tool_outputs(task)
+    tavily_candidates = _materialize_tavily_results_from_tool_outputs(tool_outputs)
+    context7_candidates = _materialize_context7_results_from_tool_outputs(tool_outputs)
+    playwright_candidates = _materialize_query_url_playwright_results(tool_outputs)
     try:
         result = _summarize_web_tool_outputs(task, tool_outputs)
+        result = _attach_serpapi_composite_scores(result)
         result = _keep_serpapi_top_n_after_score(result)
         tool_outputs, result = _maybe_fetch_serpapi_page_and_enrich(
             tool_outputs,
@@ -1014,8 +1565,15 @@ def web_search_subagent_tool(task_json: str) -> str:
         )
     except Exception as exc:  # noqa: BLE001 - 汇总失败时不能重启工具循环
         result = _fallback_result_from_tool_outputs(task, tool_outputs)
-        result["hitl_reason"] = f"Web 工具汇总失败：{exc}；{result['hitl_reason']}"
-    result = _normalize_web_hitl_decision(result)
+        result = _attach_serpapi_composite_scores(result)
+        result["summarize_error"] = str(exc)
+    result = _merge_code_materialized_candidates(
+        result,
+        tavily_candidates=tavily_candidates,
+        context7_candidates=context7_candidates,
+        playwright_candidates=playwright_candidates,
+    )
+    result = _finalize_playwright_only_hitl(tool_outputs, result)
     result["tool_evaluation_records"] = _build_web_tool_evaluation_records(tool_outputs)
     return json.dumps(result, ensure_ascii=False)
 

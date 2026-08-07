@@ -1,6 +1,6 @@
 # ResearchOps Agent 规格
 
-> 状态：草案 · 版本：0.2.0 · 更新日期：2026-08-06
+> 状态：草案 · 版本：0.3.0 · 更新日期：2026-08-07
 > 本文件是 ResearchOps Agent 当前需求、行为边界、核心契约与验收标准的唯一事实来源。
 
 ## 1. 项目概要
@@ -11,7 +11,7 @@
 
 ### 解决方案
 
-ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为子问题和最低证据标准，通过多源检索、工具输出清洗、证据质量评估、冲突识别、动态 HITL、报告 Review、安全审查和本地产物持久化，生成一份可追溯、可降级、可评估的 Markdown 研究报告。第一版只做 demo 级闭环，优先证明 Agentic Workflow、证据治理、LangSmith 观测评估和安全边界设计，不追求生产级数据源覆盖或复杂前端。
+ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为子问题和最低证据标准，通过多源检索、工具输出清洗、证据准入、证据质量评估、极简语义冲突识别、LLM 报告生成与质量 Review、安全审查和本地产物持久化，生成一份可追溯、可降级、可评估的 Markdown 研究报告。Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降级），稳定后再补真实人机接管。第一版只做 demo 级闭环，优先证明 Agentic Workflow、证据治理、LangSmith 观测评估和安全边界设计，不追求生产级数据源覆盖或复杂前端。
 
 ### 成功指标
 
@@ -21,7 +21,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | MVP 链路可运行 | 主 Graph、节点路由和产物持久化已实现 | 一次运行能产出报告、指标和本地图 | `scripts/run_smoke.py` 手动 smoke |
 | 报告可追溯 | 结论通过 `question_id`、`evidence_id` 关联 | 报告引用可回溯到标准化证据 | Review 节点与人工检查 |
 | 证据不足处理 | 已实现预算检查、迭代和降级报告 | 证据不足时不强行编造，并披露降级原因 | 证据充足性与报告测试 |
-| 安全边界 | Input Guard 使用 LLM，Safety Review 使用确定性规则 | 注入、敏感信息和高风险请求能被标记或降级 | Safety Dataset 与手动检查 |
+| 安全边界 | Input Guard（LLM）+ 工具不可信边界 + Safety Review（规则）+ 分散权限 | 注入、敏感信息和高风险请求能被标记或降级；HITL 不计入安全闭环 | Safety Dataset 与手动检查 |
 
 
 
@@ -36,8 +36,8 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 支持用户输入研究主题，输出本地 Markdown 研究报告。
 - 支持研究计划、子问题拆解、搜索任务分发、证据治理、报告生成、质量 Review 和安全审查的完整流程。
 - 支持 Web Search、本地文档搜索、结构化 mock 数据三类数据源；Graph 固定并行调用 Web 与本地检索节点，各节点按 `source_type` 内部过滤任务。
-- 支持 Web Search 登录墙、验证码、反爬或必须人工接管场景的 HITL 路由和 DevTools 页面观察；当前不真正暂停等待用户操作。
-- 支持证据冲突高风险场景的 HITL 路由占位。
+- 支持 Web Search 登录墙、验证码、反爬场景的 HITL **观测占位**路由和 DevTools 页面观察；不真正暂停、不因 `completed=false` 降级；真实人机接管为后续能力。
+- 支持证据语义冲突触发的 HITL **观测占位**路由；人工确认结果只记入状态与 metrics，不改写证据、不驱动降级。
 - 支持检索预算、报告 Review 修正预算、安全修正预算三套独立控制。
 - 支持最终后台静默保存运行产物，包括报告、指标和实际运行图；当前静态编排图由脚本保存 PNG。
 - 核心 Prompt 使用 YAML 管理并记录版本与 schema 契约。
@@ -63,7 +63,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | 项目作者 | 输入一个 AI 产品研究主题 | 生成可追溯研究报告和运行指标 |
 | 项目作者 | 运行示例或演示样例 | 可以展示 Graph 编排、降级、安全、评估设计 |
 | 面试官 | 询问项目如何避免幻觉 | 可以说明最低证据标准、证据评分、Review 和降级机制 |
-| 面试官 | 询问 Agent 安全 | 可以说明 Input Guard、Tool Output Sanitizer、权限分级和 Safety Review |
+| 面试官 | 询问 Agent 安全 | 可以说明 Input Guard、Tool 不可信边界、权限分级和 Safety Review；HITL 明确为观测占位 |
 
 
 
@@ -84,8 +84,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
         -> 可选 web_search_hitl_request
         -> web_search_result_ready
   -> web_search_result_ready 与 local_document_search_tool 汇聚
-  -> tool_output_sanitizer
-  -> deduplicate_and_cluster
+  -> sanitize_and_cluster
   -> evaluate_evidence_quality
   -> 可选 request_human_review
   -> build_evidence_matrix
@@ -111,23 +110,22 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | --- | --- | --- | --- |
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；风险不可继续时进入降级准备；否则进入研究分析 |
 | `plan_research` | `user_query`、工作流配置、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：研究计划、最低证据标准、索引、预算、首轮任务；迭代模式：下一轮 `search_tasks`、任务索引、`active_question_ids`、`search_attempt`、分发模式 | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始或迭代 Prompt；每次执行统一递增 `search_steps`；Graph 随后固定并行调用 Web 与本地检索节点 |
-| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_tool_evaluation_records`、`web_hitl_required`、`web_hitl_reason` | 对多个 Web `search_tasks` 做有界任务级并发，单任务内仍按固定顺序调度工具；首次 LLM 汇总打分后对 SerpAPI 按综合分 keep top N，再按问题整体分与 SerpAPI top1 门槛决定是否抓取正文，并由代码把正文写入对应候选；不做内部 Agent 循环；结果、评测记录和首个 HITL 原因按原任务顺序确定性合并；SerpAPI 通过 Python SDK 调用，Tavily/Context7 通过 MCP 调用；Playwright 页面正文抓取与 Web HITL 规则见本节后文 |
+| `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_tool_evaluation_records`、`web_hitl_required`、`web_hitl_reason` | 对多个 Web `search_tasks` 做有界任务级并发，单任务内仍按固定顺序调度工具；Tavily / Context7 由代码物化且不进汇总 LLM；仅 SerpAPI 压缩结果进入汇总 LLM 打四维分并判断是否抓正文，代码写入综合 `score` 后 keep top N，再按 LLM 决策（硬分否决/兜底）可选 Playwright 写 `body`；合并时按 URL 去重；不做内部 Agent 循环；细节见本节后文 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH`、结构化 mock 数据配置 | `local_document_results` | `local_document` 使用只读 Markdown 关键词搜索；`structured_mock` 使用 LLM 规划安全关键词后执行参数化 SQLite 查询；两类任务均在节点内部按 `source_type` 过滤 |
-| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | 仅对 `requires_login=true` 的结果调用 DevTools 观察登录、验证码或权限页面；当前记录 `completed=false`，不真正暂停 |
-| `web_search_result_ready` | 无业务字段 | `executed_nodes` | Web 分支汇聚节点；无 HITL 时直接进入，有 HITL 时在观察完成后进入，再与本地检索分支汇聚 |
-| `tool_output_sanitizer` | `web_search_results`、`local_document_results` | `sanitized_results`，并清空两类上游结果 | 已实现确定性边界标记；外部内容统一标记为 `untrusted_tool_output`，不得作为系统指令；不额外保存未清洗副本 |
-| `deduplicate_and_cluster` | `sanitized_results` | `evidence_clusters`，并清空 `sanitized_results` | 当前为确定性去重与按 `question_id` 聚类实现；不生成最终证据结论 |
-| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions`，并清空 `evidence_clusters` | 当前为确定性规则评分；发现高冲突时触发冲突 HITL |
-| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | 当前为替代实现，不真正暂停；人工确认结果只作为状态事实，不直接改写证据正文 |
-| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`entity_index` | `evidence_matrix`、`entity_index.used_evidence_ids` | 必须通过 `question_id` 和 `evidence_id` 关联 |
-| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `question_evidence_status`、`evidence_sufficiency_result`、`evidence_sufficient`、`insufficient_question_ids`、`degradation_reason` | 已实现 Priority 加权证据充足性评分 |
-| `check_step_budget` | `search_steps`、`max_search_steps`、`insufficient_question_ids` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
-| `strategy_iteration` | `insufficient_question_ids`、`question_evidence_status`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；通过 `planning_mode=iteration` 选择迭代检索 Prompt；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用 Claude Code 或 Codex 生成策略建议 |
+| `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | **观测占位**：仅服务 Playwright 触发的登录/验证码/权限墙；只对 `requires_login=true` 的结果调用 DevTools 观察；记录 `completed=false`，不真正暂停，不因未完成而降级或阻断后续证据治理 |
+| `web_search_result_ready` | 无业务字段 | `executed_nodes` | Web 分支汇聚节点；无 HITL 时直接进入，有 HITL 观测后进入，再与本地检索分支汇聚 |
+| `sanitize_and_cluster` | `web_search_results`、`local_document_results` | `evidence_clusters`、可选 `discarded_candidate_count`，并清空两类上游结果 | 标记 `untrusted_tool_output`、按规范化 URL 去重、按 `question_id` 聚类；丢弃不可准入候选（见证据准入契约）；不再写入 `sanitized_results` |
+| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions`，并清空 `evidence_clusters` | 整表替换本轮 `evidence_items`/`conflicts`；按来源分桶计算 `reliability_score`；长文写入 `outputs/evidence/{evidence_id}.txt`；仅当同题证据命中极简语义冲突规则时建 `ConflictItem`；`hitl_triggered` 仅决定是否走冲突 HITL **观测**节点 |
+| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | **观测占位**：不真正暂停；只记录冲突观测事实，不改写证据正文，不触发降级 |
+| `build_evidence_matrix` | `evidence_items`、`sub_questions`、`entity_index` | `evidence_matrix` | `evidence_matrix` 只存 `question_id`、证据 ID 列表与少量聚合字段；**不**在此把矩阵收录标为 `used_in_final_report` |
+| `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `evidence_sufficiency_result`、`degradation_reason` | 充足性只写入 `evidence_sufficiency_result`；`sufficient` / 分项状态 / `insufficient_question_ids` 均由此结构读取，不再另写顶层镜像字段 |
+| `check_step_budget` | `search_steps`、`max_search_steps`、`evidence_sufficiency_result` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
+| `strategy_iteration` | `evidence_sufficiency_result`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；`search_iteration_context` 中上一轮任务只保留 `task_id` / `query` / `source_type` 摘要；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用外部 worker |
 | `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
-| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`degraded`、`review_result` | `report_draft`、`review_revision_count`、`degraded`、`degradation_reason` | 已实现确定性 Markdown 报告生成；普通和降级报告都由此节点生成；降级报告在 Review 中直接视为可继续 |
-| `review_research_report` | `report_draft`、`evidence_matrix`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | 已实现确定性质量 Review；只评估研究质量；不评估安全边界 |
-| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report` | 已实现规则安全审查；只评估安全边界；不替代质量 Review |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
+| `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations |
+| `review_research_report` | `report_draft`、`evidence_matrix`、`evidence_items`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | LLM 结构化质量 Review；输出评分与 `revision_suggestions`；不评估安全边界；`degraded=true` 时直接放行 |
+| `safety_review` | `report_draft`、`review_result`、`safety_revision_count` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 当前为线性示意（由 `executed_nodes` 列表生成，不还原 fan-out/fan-in）；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
 
 ### 检索工具契约
@@ -135,45 +133,71 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - Web Search 使用确定性调度和单次 LLM 汇总：
   - `web_search_sub_agent` 对多个 Web `search_tasks` 使用有界线程池并发；默认并发度为 `WEB_SEARCH_TASK_CONCURRENCY=3`，最小为 1；合并结果时保持原任务顺序，任一任务抛错时节点整体失败。
   - 单任务内部仍串行调用工具，顺序不变；工具级限流为 Playwright=1、Tavily=1、Context7=2、SerpAPI=3，避免高成本 MCP / Chrome 会话风暴。
-  - 所有 Web 任务调用 SerpAPI；SerpAPI 通过 `google-search-results` Python 包直连 API；请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）；全部返回结果进入首次汇总 LLM 打分，打分后再按综合分保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
-  - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）；Tavily 已面向答案相关性排序，不再另设 keep top N。
-  - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP，依次执行 library resolve 和 docs query；进入汇总 LLM 前按 `WEB_SEARCH_CONTEXT7_MAX_CHARS` 截断文档正文（默认 4000）。
-  - query 含 URL 时，首次汇总前调用 Playwright 抓取该 URL。
-  - SerpAPI 结果页正文抓取改为汇总打分之后由代码判定：候选综合分 = `source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2`；问题整体分为全部候选综合分的均值。若整体分 ≥ `WEB_SEARCH_QUESTION_PASS_SCORE`（默认 0.75）则不抓正文；若整体分未达标，则在 SerpAPI 候选中按 `(relevance_score + source_confidence_score) / 2` 选取最高分条目，仅当该分 ≥ `WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）时抓取该 top1 URL 正文（压缩为 `url` / `title` / 截断正文），并由代码把正文写入该条候选的 `snippet`（有页面 title 时同步更新 `title`），不二次进入汇总 LLM、不重打分。
-  - 进入汇总 LLM 前必须压缩 `tool_outputs`：SerpAPI / Tavily 只保留 `title` / `url` / `snippet` / `published_at`；SerpAPI 条数不超过本次请求返回（由 `WEB_SEARCH_SERPAPI_NUM` 限制），Tavily 条数不超过 `WEB_SEARCH_TAVILY_MAX_RESULTS`；Playwright 只保留 `url` / `title` / 截断正文，正文上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`（默认 3000）；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
+  - 所有 Web 任务调用 SerpAPI；请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）。压缩保留 `title` / `url` / `snippet` / `published_at` 后进入汇总 LLM；LLM 输出四维分，并输出顶层 `needs_page_fetch` / `fetch_url` / `fetch_reason`（是否抓正文由 LLM 主决策：snippet 已够则 false；缺关键数字/条款/长文等则 true，且只选一条 keep 后候选 URL）。代码计算综合分 `score = source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2` 并写入结果，再按 `score` 保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
+  - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）。Tavily 不进入汇总 LLM；代码按 `title` / `score` / `url` / `snippet`(取 `content`) / `published_at` 保留并物化为候选。
+  - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP；官方文档不进入汇总 LLM、不做搜索相关性打分；代码保留 `docs_result` / `resolve_result`（及 `library_id`）并物化为候选，`snippet` 不承载文档正文；证据层对其采用权威加权分桶，并把 `docs_result` / `resolve_result` 写入 `EvidenceItem`。
+  - query 含 URL 时，由 Playwright 抓取该 URL，代码物化为带 `body` 的候选，不进入汇总 LLM。
+  - SerpAPI 结果页正文：keep top N 后由代码解析抓取目标——主决策为 LLM 的 `needs_page_fetch` + 合法 `fetch_url`（必须属于 keep 后 Serp 候选）；`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）仅作否决与兜底：目标条 `relevance_score` 未严格大于该阈值则否决且不改抓其他页；LLM 要求抓取但 `fetch_url` 缺失或不在候选中时，回退为 keep 后 `relevance_score` 最高且严格大于阈值的一条。成功后在该条写入 `body`（截断正文，上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`，默认 3000），保留原 `snippet`，不二次进入汇总 LLM。
+  - 最终由代码合并 Tavily、Context7、query-URL Playwright 与打分后的 SerpAPI 候选，并按规范化 URL/路径去重（同 URL 优先保留含 `body`、更高分、更完整正文的候选）；进入汇总 LLM 的 `tool_outputs` 仅含 SerpAPI 压缩结果；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
   - Playwright 使用 headless + isolated Chrome；导航与快照必须在同一显式 MCP 会话内完成，避免新会话返回 `about:blank`。
-  - 单次 LLM 汇总失败时，当前实现使用 SerpAPI 首条结果形成低可信度候选；没有可用结果时设置 Web HITL。
-- 普通页面 403、超时、空正文或 `about:blank` 在已有搜索摘要时只降低可信度；登录墙、验证码和权限确认才保留 HITL。
+  - 单次 LLM 汇总失败时，当前实现使用 SerpAPI 首条结果形成低可信度候选；没有可用结果时不触发 Web HITL。
+- Web HITL 仅服务 Playwright：仅当 Playwright（query URL 抓取或 Serp 结果页抓取）确定性检测到登录墙、验证码或权限墙时，才将对应候选标为 `requires_login=true` 并设置 `web_hitl_required=true`；SerpAPI 汇总 LLM 不输出、不判断 HITL；Tavily、Context7 与“无搜索结果”均不得触发 Web HITL。普通页面 403、超时、空正文或 `about:blank` 只降低可信度，不进 Web HITL。
+- `web_search_hitl_request` 为观测占位：仅对 `requires_login=true` 的结果调用 DevTools 观察；记录 `completed=false`，不真正暂停，不因未完成 HITL 降级。
 - `local_document` 使用 jieba 搜索分词和子串匹配，递归读取配置目录内 `.md` 文件；单文件最大 1 MB，最多返回 8 条，禁止路径逃逸。无匹配返回空列表，异常返回带 `blocked_reason` 的结果。
 - `structured_mock` 首次查询时可从 `data/mock/ai_products.json` 初始化 SQLite；实际执行为允许字段上的参数化 `LIKE` OR 查询，默认 5 条、上限 20。无匹配返回标明 `matched_product_count=0` 的结果。
 
+
+
+### 证据准入契约
+
+进入 `evidence_items` 并参与充足性计数前，候选必须通过准入过滤。满足任一条件的候选必须丢弃，不得抬高充足性：
+
+- `requires_login` 为 `true`
+- `blocked_reason` 非空
+- `url_or_path` 以 `placeholder://` 开头（本地失败 / 无匹配等工具占位）
+- 存在 `structured_payload.matched_product_count == 0`
+
+丢弃数量可写入运行 State 的 `discarded_candidate_count` 供 metrics 观测；工具侧仍可保留失败占位便于调试。
+
+
+
+### 极简语义冲突规则
+
+- 仅对同一 `question_id` 下至少 2 条有效证据做两两检测。
+- 检测文本取自 `title + snippet`（启发式，非完整 NLI）。
+- **对立极性**：预置中英对立词对；同题两条分别命中对立两侧则建 `ConflictItem`。
+- **同锚点数字矛盾**：同一邻近关键词窗口内数值相对差异 ≥ 20% 且绝对差有意义则建 `ConflictItem`。
+- `preferred_evidence_id` 取冲突组内 `reliability_score` 最高者；语义冲突的 `hitl_need_score` 固定为 `6.0`，是否 `hitl_triggered` 仍与 `HITL_CONFLICT_THRESHOLD` 比较。
+- 多源并存但未命中上述信号时**不**建冲突；`hitl_triggered` 仅用于是否进入冲突 HITL 观测节点，不代表人工已裁决。
 
 
 
 ### 关键状态与边界
 
 - `sub_questions` 是唯一问题目录，key 为 `question_id`。
-- `expected_evidence`、`minimum_evidence_standard`、`question_evidence_status` 必须使用同一组 `question_id` 作为 key。
+- `expected_evidence`、`minimum_evidence_standard`、`evidence_sufficiency_result.question_status` 必须使用同一组 `question_id` 作为 key。
 - `evidence_items` 是唯一证据目录，key 为 `evidence_id`。
 - `conflicts` 是唯一冲突目录，key 为 `conflict_id`。
-- `required_source_types`、`evidence_sufficiency_score`、`evidence_sufficiency_threshold`、`web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
-- 搜索流水线中间结果在其最后一个消费者执行后清空；最终 State 不重复保留 Web、本地、清洗和聚类阶段的完整候选结果。
-- 跨结构关联只保存 ID，不复制问题正文或证据正文。
-- `evidence_items` 和 `conflicts` 使用字典合并 reducer，`executed_nodes` 使用列表累加 reducer，以支持并行分支写入。
+- `required_source_types`、`web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
+- 搜索流水线中间结果在其最后一个消费者执行后清空；最终 State 不重复保留 Web、本地与聚类阶段的完整候选结果。
+- 跨结构关联只保存 ID，不复制问题正文或证据正文；证据长文落盘 `outputs/evidence/`，State 只保留 `content_path` 与短 `snippet`。
+- `evidence_items` 与 `conflicts` 由 `evaluate_evidence_quality` **整表替换**（不再使用并行 merge reducer），避免策略迭代残留旧证据；`executed_nodes` 与 `web_tool_evaluation_records` 仍使用列表累加 reducer。
 - 必须存在的业务对象读取时使用 `[]` 或显式校验，不用 `.get()` 静默隐藏上游错误。
 - 可选流程状态和默认计数可以使用 `.get()`，例如 `state.get("search_steps", 0)`。
-- Web 与本地资料检索输出进入模型前必须经过 `tool_output_sanitizer`；结构化 mock 数据属于本地资料检索输出。
+- 证据充足性只以 `evidence_sufficiency_result` 为准；路由与策略迭代从该结构读取。
+- Web 与本地资料检索输出进入证据治理前必须经过 `sanitize_and_cluster`；结构化 mock 数据属于本地资料检索输出。
 - 外部网页、文档和工具返回内容只作为不可信资料，不作为系统指令。
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
 - Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
 - `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"`、`search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
-- `generate_research_report` 负责普通报告和降级报告正文生成。
+- `generate_research_report` 负责普通报告和降级报告正文生成（LLM）；`used_in_final_report` / `final_citation_count` 以报告实际引用的合法 `evidence_id` 为准。
 - Input Guard 不通过时跳过规划和检索，但仍经过报告 Review、Safety Review 和产物持久化。
 - `degraded = true` 的报告由质量 Review 直接放行，继续执行 Safety Review。
-- `review_research_report` 负责研究质量，不负责安全审查。
-- `safety_review` 负责安全边界，不负责研究质量评分。
-- 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点，避免污染业务流程；不需要保存 `.mmd` 文件。
+- `review_research_report` 负责研究质量，不负责安全审查；不通过且预算未耗尽时，下一次生成必须消费 `revision_suggestions`。
+- `safety_review` 负责安全边界，不负责研究质量评分；安全不通过再生成时，报告 Prompt 须附带风险与保守改写约束。
+- Web HITL 与冲突 HITL 均为观测占位：写入决策/观察记录与 metrics，不构成安全闭环，当前版本忽略未完成 HITL，不因此降级。
+- 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点；当前为线性示意，不需要保存 `.mmd` 文件。
 
 
 
@@ -280,7 +304,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `ExpectedEvidence` | `question_id`、`evidence_description`、`minimum_count`、`required_source_types`、`required_authority_level` | `question_id` 必须存在于 `sub_questions` |
 | `MinimumEvidenceStandard` | `question_id`、`min_total_evidence`、`min_high_quality_sources`、`must_include_source_types`、`allow_degraded_answer` | `question_id` 必须存在于 `sub_questions` |
 | `SearchTask` | `task_id`、`question_id`、`query`、`source_type`、`search_provider`、`attempt` | `question_id` 必须存在于 `sub_questions` |
-| `EvidenceItem` | 身份与来源字段、五类评分及 `reliability_score`、`score_reason`、`used_in_final_report` | `evidence_id` 唯一；`question_id` 必须存在于 `sub_questions` |
+| `EvidenceItem` | 身份与来源字段、短 `snippet`、可选 `content_path`（指向 `outputs/evidence/{evidence_id}.txt`）、四维分（`relevance_score` / `answer_coverage_score` / `source_confidence_score` / `freshness_score`）、`reliability_score`、可选 `score_bucket` / `scored_by` / `library_id`、`score_reason`、`used_in_final_report` | `evidence_id` 唯一；`question_id` 必须存在于 `sub_questions`；长文不进 State；`reliability_score` 计算时权威权重取自 `source_type` 表，`source_confidence_score` 来自工具；不持久化 `authority_score` |
 | `ConflictItem` | `conflict_id`、`question_id`、`evidence_ids`、`conflict_summary`、`preferred_evidence_id`、`hitl_need_score`、`hitl_triggered` | `evidence_ids` 必须存在于 `evidence_items` |
 | `QuestionEvidenceStatus` | 问题与 Priority、证据数量、来源覆盖、最低标准、加权分和缺口原因 | `priority_weight` 参与整体加权评分 |
 | `EvidenceSufficiencyResult` | `sufficient`、`overall_score`、`threshold`、`high_priority_all_met`、`question_status`、缺口与降级字段 | `question_status` 的 key 必须存在于 `sub_questions` |
@@ -310,7 +334,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - `evidence_id` 由证据标准化过程生成，格式建议为 `E1`、`E2`。
 - `conflict_id` 由冲突识别过程生成，格式建议为 `C1`、`C2`。
 - Prompt YAML 必须记录 `name`、`version`、`owner_node`、`input_schema`、`output_schema`。
-- 当前 Prompt 文件为 `input_guard.yml`、`research_planner.yml`、`search_task_planner.yml`、`web_search_subagent.yml`、`local_structured_search.yml`。
+- 当前 Prompt 文件为 `input_guard.yml`、`research_planner.yml`、`search_task_planner.yml`、`web_search_subagent.yml`、`local_structured_search.yml`、`research_report.yml`、`research_report_review.yml`。
 - `load_prompt` 当前强制校验 `name`、`version`、`owner_node`、`system_prompt`、`user_prompt_template`；`input_schema`、`output_schema` 是文档契约，运行时结构由 `src/llm/structured_outputs.py` 的 Pydantic 模型保证。
 - 运行时模型角色以 `src/config/settings.py` 的 `DASHSCOPE_MODEL_FIELDS` 和节点传入的 role 为准；YAML `model_role` 当前仅作文档。
 - `local_structured_search.yml` 的 `snippet_template` 被运行时使用；其他展示模板字段当前主要作为文档配置。
@@ -357,10 +381,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 ### 配置
 
 - `src/config/settings.py` 导入时加载项目根 `.env`。Studio 输入仅含 `user_query`；预算和阈值由环境变量管理。
-- LLM 基础配置：`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`。节点模型覆盖：`SAFETY_GUARD_MODEL`、`RESEARCH_PLANNER_MODEL`、`SEARCH_TASK_PLANNER_MODEL`、`WEB_SEARCH_SUBAGENT_MODEL`、`LOCAL_DOCUMENT_SEARCH_MODEL`。
+- LLM 基础配置：`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`。节点模型覆盖：`SAFETY_GUARD_MODEL`、`RESEARCH_PLANNER_MODEL`、`SEARCH_TASK_PLANNER_MODEL`、`WEB_SEARCH_SUBAGENT_MODEL`、`LOCAL_DOCUMENT_SEARCH_MODEL`、`RESEARCH_REPORT_MODEL`、`RESEARCH_REPORT_REVIEW_MODEL`。
 - 只有模型名为 `deepseek-chat` 或 `deepseek-reasoner` 时使用 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`；DashScope 托管的 `deepseek-v4-*` 仍使用 DashScope。
 - 工作流必需配置：`MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS`、`HITL_CONFLICT_THRESHOLD`、`REVIEW_PASS_SCORE`。冲突项当前 `hitl_need_score=6.0`，默认阈值 9.0 时不触发冲突 HITL。
-- 在线检索配置：`SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_QUESTION_PASS_SCORE`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限。
+- 在线检索配置：`SERPAPI_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限。
 - Playwright MCP 通过 stdio 启动 `npx -y @playwright/mcp --headless --isolated --browser chrome`；Tavily 通过 `mcp-remote` stdio 代理；Context7 使用 streamable HTTP。
 - DevTools 配置：`ENABLE_HITL_DEVTOOLS` 默认 true，`HITL_DEVTOOLS_HEADLESS` 默认 false；仅在 Web HITL 且结果需要登录时实际调用 `chrome-devtools-mcp@latest`。
 - 本地 Markdown 根路径由 `LOCAL_DOCUMENTS_BASE_PATH` 管理，在首次本地检索时校验。
@@ -398,11 +422,11 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - 权限不足
   - 证据不足
   - 数据源冲突
-  - HITL 未完成
+  - HITL 观测未完成（仅记录，当前不阻断）
   - Review 未通过
   - Safety 未通过
   - 产物写入失败
-- 允许降级：证据不足、冲突无法解决、HITL 未完成、安全风险需要保守输出、检索预算不足。
+- 允许降级：证据不足、安全风险需要保守输出、检索预算不足。冲突披露进入报告正文，但不因冲突本身自动降级；当前版本**不因** HITL 观测未完成而降级。
 - 禁止降级：必要配置缺失、Schema 不一致、必须存在的业务对象缺失、产物写入路径越权。
 - Online MCP 工具失败和超时序列化为 `ok=false` JSON，供 Web SubAgent 评估；依赖缺失、已有 event loop 的同步调用等运行条件错误显式返回失败。
 
@@ -422,6 +446,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `evidence_count`
   - `final_citation_count`
   - `conflict_count`
+  - `discarded_candidate_count`（证据准入丢弃数，可选）
   - `degraded`
   - `degradation_reason`
   - `review_score`
@@ -429,11 +454,11 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `source_contribution`
   - `web_hitl_trigger_count_by_source`
   - `executed_mermaid_png_path`
-- `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；`executed_mermaid` 只保留在 State，不保存 `.mmd` 文件。
+- `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；`executed_mermaid` 只保留在 State，不保存 `.mmd` 文件；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
 - 当前 evaluator：
-  - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
+  - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 观测指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
   - `research_report_pairwise_preference`：LLM-as-Judge Pairwise A/B，从回答问题、证据支撑、覆盖、限制披露、引用、结构和安全七个维度比较报告。
-  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，只保留工具名、成功状态、有效结果数、正文长度、失败类型和截断错误，并以列表累加 reducer 保留各轮紧凑记录，不把搜索结果或页面正文写入主 Graph State，也不增加 summarize LLM 的职责；evaluator 只按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`。
+  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，只保留工具名、成功状态、有效结果数、正文长度、失败类型和截断错误，并以列表累加 reducer 保留各轮紧凑记录；evaluator 按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`（输入已由主 Graph State 接线）。
   - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果；没有触发外部 worker 的 run 标记为 `not_applicable`。
 - 当前 LangSmith dataset 定义：`researchops-input-guard-v1`、`researchops-standard-research-v1`、`researchops-url-web-search-v1`、`researchops-local-and-structured-v1`、`researchops-edge-cases-v1`。
 - `src/dataset` 提供 dataset 创建、样例追加、split 管理和 Pairwise A/B 运行脚本；均为手动入口，不进入主 Graph。
@@ -460,13 +485,15 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - [x] `persist_outputs` 保存报告、metrics 和实际运行链路 PNG，且不保存 `.mmd` 文件。
 - [x] State 不存在全局 `max_steps`；检索、Review、安全分别独立计数。
 - [x] `plan_research` 后固定并行调用 Web 与本地检索节点；结构化 mock 在本地节点内部处理。
-- [x] Web 分支通过可选 HITL 和 `web_search_result_ready` 与本地分支汇聚到 `tool_output_sanitizer`。
+- [x] Web 分支通过可选 HITL 和 `web_search_result_ready` 与本地分支汇聚到 `sanitize_and_cluster`。
 - [x] 证据不足先进入 `check_step_budget`，再决定 `strategy_iteration` 或 `prepare_degraded_report`。
 - [x] `prepare_degraded_report` 只设置降级状态，不生成报告正文。
 - [x] Review 不通过且修正次数未耗尽时回到 `generate_research_report`。
 - [x] Safety 不通过且安全修正次数未耗尽时进入降级报告路径。
-- [x] State 业务对象使用稳定 ID 关联，并为并行字典和执行路径配置 reducer。
+- [x] State 业务对象使用稳定 ID 关联；`executed_nodes` 等并行路径使用累加 reducer；`evidence_items`/`conflicts` 整表替换。
 - [x] 必需配置、Schema 和产物路径错误显式暴露，不以伪造结果隐藏。
+- [x] 证据准入过滤失败/登录墙/无匹配占位；语义冲突启发式替代多源即冲突。
+- [x] 报告与 Review 为 LLM 节点；生成消费 `revision_suggestions`；引用以合法 `evidence_id` 为准。
 - [ ] 当前仓库没有 README；后续新增 README 或演示材料时必须与本 SPEC 对齐。
 
 
@@ -477,10 +504,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | 需求 ID | SPEC 章节 | 实现位置 | 测试位置 | 状态 |
 | --- | --- | --- | --- | --- |
 | `REQ-001` | 3. 主流程 | `src/workflow/graph.py`、`edges.py`、各 `*_nodes.py` | `test_plan_research.py`、`test_web_search_subagent.py`、`test_evidence_sufficiency.py`、`test_graph_input_schema.py` | 部分完成：缺默认离线全链路 invoke 测试 |
-| `REQ-002` | 5. 数据模型 | `src/schemas/state.py`、`src/llm/structured_outputs.py` | `test_state_reducers.py`、`test_graph_input_schema.py`、`test_evidence_quality_scores.py` | demo 级完成 |
-| `REQ-003` | 5–6. Prompt 与模型 | `prompts/*.yml`、`src/llm/prompt_loader.py`、`src/config/settings.py` | `test_plan_research.py`、`test_workflow_config.py`、`test_structured_local_search.py` | demo 级完成 |
+| `REQ-002` | 5. 数据模型 | `src/schemas/state.py`、`src/llm/structured_outputs.py` | `test_state_reducers.py`、`test_graph_input_schema.py`、`test_evidence_quality_scores.py`、`test_evidence_conflict.py` | demo 级完成 |
+| `REQ-003` | 5–6. Prompt 与模型 | `prompts/*.yml`、`src/llm/prompt_loader.py`、`src/config/settings.py` | `test_plan_research.py`、`test_workflow_config.py`、`test_structured_local_search.py`、`test_research_report_nodes.py` | demo 级完成 |
 | `REQ-004` | 7. 数据与存储 | `src/workflow/artifact_nodes.py`、`outputs/` | `test_artifact_nodes.py` | demo 级完成 |
-| `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：HITL 不真正暂停，权限无统一注册表 |
-| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Trace metadata 和 Web evaluator 输入接线未完成 |
+| `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：HITL 为观测占位（非安全闭环），权限无统一注册表；真实 interrupt HITL 后续补齐 |
+| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 已接线；Trace metadata 与 latency/tokens 仍为后续 |
 
 

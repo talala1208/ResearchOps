@@ -224,7 +224,6 @@ def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, A
                 "snippet": snippet,
                 "published_at": None,
                 "collected_by": "local_structured_search",
-                "is_placeholder": False,
                 "requires_login": False,
                 "blocked_reason": None,
                 "structured_payload": {

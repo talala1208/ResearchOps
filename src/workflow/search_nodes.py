@@ -114,19 +114,28 @@ def _materialize_web_search_results(
                 "question_id": task["question_id"],
                 "source_type": task["source_type"],
                 "source_name": item["source_name"],
-                "url_or_path": item["url_or_path"],
+                "url_or_path": item.get("url_or_path") or item.get("url"),
+                "url": item.get("url") or item.get("url_or_path"),
                 "title": item["title"],
-                "snippet": item["snippet"],
+                "snippet": item.get("snippet") or "",
+                "body": item.get("body"),
                 "published_at": item.get("published_at"),
                 "collected_by": "web_search_subagent",
-                "is_placeholder": True,
                 "requires_login": bool(item.get("requires_login", False)),
                 "blocked_reason": item.get("blocked_reason"),
+                "score": item.get("score"),
                 "relevance_score": item.get("relevance_score"),
                 "answer_coverage_score": item.get("answer_coverage_score"),
                 "source_confidence_score": item.get("source_confidence_score"),
                 "freshness_score": item.get("freshness_score"),
                 "score_reason": item.get("score_reason"),
+                "tavily_score": item.get("tavily_score"),
+                "docs_result": item.get("docs_result"),
+                "resolve_result": item.get("resolve_result"),
+                "library_id": item.get("library_id"),
+                "playwright_hitl": item.get("playwright_hitl"),
+                "score_bucket": item.get("score_bucket"),
+                "scored_by": item.get("scored_by"),
             }
         )
     return results
@@ -158,7 +167,6 @@ def _build_placeholder_result(
         "snippet": f"替代数据源结果：围绕 `{query}` 为子问题 `{question_id}` 提供一条 {source_type} 类型候选证据。",
         "published_at": None,
         "collected_by": collected_by,
-        "is_placeholder": True,
         "requires_login": False,
         "blocked_reason": None,
     }
@@ -225,10 +233,10 @@ def web_search_sub_agent(state: ResearchState) -> dict[str, Any]:
 
 
 def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
-    """Web Search 登录 / 反爬 HITL 处理。
+    """Web Search Playwright 登录 / 反爬 HITL 观测占位。
 
-    DevTools 只在 HITL 场景使用，用于打开、确认和展示登录 / 权限页面。
-    当前节点不默认通过 HITL；它只记录待人工接管的页面观察结果。
+    仅服务 Playwright 触发的 requires_login 结果；用 DevTools 观察登录 / 权限页。
+    记录 `completed=false`，不真正暂停，不因未完成而降级；不构成安全闭环。
     """
 
     web_results = state.get("web_search_results", [])
@@ -236,7 +244,15 @@ def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
     for result in web_results:
         if not result.get("requires_login"):
             continue
-        url = result["url_or_path"]
+        # 仅 Playwright 路径：显式标记或 source_name=playwright
+        if not (
+            result.get("playwright_hitl")
+            or str(result.get("source_name") or "").lower() == "playwright"
+        ):
+            continue
+        url = result.get("url_or_path") or result.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
         devtools_observation = _inspect_login_page_with_devtools(url)
         decisions.append(
             {
@@ -246,7 +262,7 @@ def web_search_hitl_request(state: ResearchState) -> dict[str, Any]:
                 "question_id": result["question_id"],
                 "url": url,
                 "completed": False,
-                "decision": "requires_user_login_or_confirmation",
+                "decision": "observation_placeholder_requires_user_login",
                 "reason": result.get("blocked_reason") or state.get("web_hitl_reason"),
                 "devtools_observation": devtools_observation,
             }
@@ -263,7 +279,7 @@ def web_search_result_ready(state: ResearchState) -> dict[str, Any]:
     """Web Search 分支完成节点。
 
     该节点用于让 `web_search_sub_agent -> 可选 web_search_hitl_request` 先完成，
-    再和 `local_document_search_tool` 汇聚到 `tool_output_sanitizer`。
+    再和 `local_document_search_tool` 汇聚到 `sanitize_and_cluster`。
     """
 
     return record_node(state, "web_search_result_ready")
@@ -341,28 +357,4 @@ def local_document_search_tool(state: ResearchState) -> dict[str, Any]:
     return {
         **record_node(state, "local_document_search_tool"),
         "local_document_results": results,
-    }
-
-
-def tool_output_sanitizer(state: ResearchState) -> dict[str, Any]:
-    """工具输出清洗占位节点。"""
-
-    raw_results = []
-    raw_results.extend(state.get("web_search_results", []))
-    raw_results.extend(state.get("local_document_results", []))
-
-    sanitized_results = [
-        {
-            **result,
-            "trust_boundary": "untrusted_tool_output",
-            "sanitized": True,
-        }
-        for result in raw_results
-    ]
-
-    return {
-        **record_node(state, "tool_output_sanitizer"),
-        "sanitized_results": sanitized_results,
-        "web_search_results": [],
-        "local_document_results": [],
     }

@@ -1,4 +1,4 @@
-"""前三个真实节点使用的结构化输出模型。"""
+"""研究节点使用的结构化输出模型。"""
 
 from __future__ import annotations
 
@@ -106,8 +106,6 @@ class WebSearchResultOutput(BaseModel):
     snippet: str
     source_name: str
     published_at: str | None = None
-    requires_login: bool = False
-    blocked_reason: str | None = None
     relevance_score: float = Field(
         ge=0.0,
         le=1.0,
@@ -135,8 +133,23 @@ class WebSearchSubAgentResultOutput(BaseModel):
     """Web Search SubAgent 标准输出。"""
 
     results: list[WebSearchResultOutput]
-    web_hitl_required: bool
-    hitl_reason: str | None = None
+    needs_page_fetch: bool = Field(
+        description=(
+            "是否需要抓取一条 Serp 结果页正文；"
+            "snippet 已覆盖 expected_evidence 时应为 false。"
+        ),
+    )
+    fetch_url: str | None = Field(
+        default=None,
+        description=(
+            "需要抓取时，必须是本批 serpapi 候选中的一条 http(s) URL；"
+            "不需要抓取时为 null。"
+        ),
+    )
+    fetch_reason: str | None = Field(
+        default=None,
+        description="一句话说明为何需要或不需要抓正文。",
+    )
 
 
 class LocalStructuredSearchQueryOutput(BaseModel):
@@ -150,3 +163,33 @@ class LocalStructuredSearchQueryOutput(BaseModel):
         description="可观测的结构化查询说明，不直接拼接执行。",
     )
     reasoning: str = Field(description="简短说明为什么选择这些关键词。")
+
+
+class ResearchReportOutput(BaseModel):
+    """研究报告 LLM 结构化输出。"""
+
+    report_markdown: str = Field(description="完整 Markdown 研究报告正文")
+    cited_evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="报告中实际引用的 evidence_id 列表，必须来自输入证据目录",
+    )
+    limitations: list[str] = Field(
+        default_factory=list,
+        description="不确定性、边界与证据缺口说明",
+    )
+
+
+class ResearchReportReviewOutput(BaseModel):
+    """研究报告质量 Review 结构化输出。"""
+
+    passed: bool = Field(description="是否达到可进入 Safety Review 的质量门槛")
+    report_score: float = Field(description="总分，0 到 1")
+    source_coverage_score: float = Field(description="来源覆盖分，0 到 1")
+    citation_completeness_score: float = Field(description="引用完整性分，0 到 1")
+    groundedness_score: float = Field(description="主张可追溯分，0 到 1")
+    boundary_score: float = Field(description="边界与限制披露分，0 到 1")
+    over_inference_risk: float = Field(description="过度推断风险，0 到 1，越高越差")
+    revision_suggestions: list[str] = Field(
+        default_factory=list,
+        description="若不通过，给出可执行的修正建议列表",
+    )

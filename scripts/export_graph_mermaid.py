@@ -27,7 +27,7 @@ PNG_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "runs" / "researchops_graph.png"
 NODE_CLASSES = {
     "safety": [
         "input_guard",
-        "tool_output_sanitizer",
+        "sanitize_and_cluster",
         "safety_review",
     ],
     "planner": [
@@ -39,7 +39,7 @@ NODE_CLASSES = {
         "local_document_search_tool",
     ],
     "evidence": [
-        "deduplicate_and_cluster",
+        "sanitize_and_cluster",
         "evaluate_evidence_quality",
         "build_evidence_matrix",
         "check_evidence_sufficiency",

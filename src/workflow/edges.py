@@ -1,4 +1,4 @@
-"""ResearchOps Agent 的占位边和路由规则。"""
+"""ResearchOps Agent 的边和路由规则。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,7 @@ PLAN_RESEARCH = "plan_research"
 WEB_SEARCH_SUB_AGENT = "web_search_sub_agent"
 WEB_SEARCH_RESULT_READY = "web_search_result_ready"
 LOCAL_DOCUMENT_SEARCH_TOOL = "local_document_search_tool"
-TOOL_OUTPUT_SANITIZER = "tool_output_sanitizer"
-DEDUPLICATE_AND_CLUSTER = "deduplicate_and_cluster"
+SANITIZE_AND_CLUSTER = "sanitize_and_cluster"
 EVALUATE_EVIDENCE_QUALITY = "evaluate_evidence_quality"
 REQUEST_HUMAN_REVIEW = "request_human_review"
 WEB_SEARCH_HITL_REQUEST = "web_search_hitl_request"
@@ -53,9 +52,9 @@ def route_after_plan_research(state: ResearchState) -> list[str]:
 
 
 def route_after_web_search(state: ResearchState) -> str:
-    """Web Search 后的 HITL 路由。
+    """Web Search 后的 HITL 观测占位路由。
 
-    用于登录墙、验证码、反爬或必须用户接管的读取场景。
+    仅用于登录墙等场景的观测记录；不暂停、不因未完成而降级。
     """
 
     if state.get("web_hitl_required", False):
@@ -64,7 +63,7 @@ def route_after_web_search(state: ResearchState) -> str:
 
 
 def route_after_evidence_quality(state: ResearchState) -> str:
-    """证据质量评估后的路由。"""
+    """证据质量评估后的冲突 HITL 观测占位路由。"""
 
     if state.get("hitl_required", False):
         return REQUEST_HUMAN_REVIEW
@@ -74,7 +73,7 @@ def route_after_evidence_quality(state: ResearchState) -> str:
 def route_after_evidence_sufficiency(state: ResearchState) -> str:
     """证据充足性判断后的路由。"""
 
-    if state.get("evidence_sufficient", False):
+    if state.get("evidence_sufficiency_result", {}).get("sufficient", False):
         return GENERATE_RESEARCH_REPORT
 
     return CHECK_STEP_BUDGET
@@ -130,7 +129,7 @@ def route_after_safety_review(state: ResearchState) -> str:
 
 
 def add_workflow_edges(builder: StateGraph) -> StateGraph:
-    """给 Graph 添加占位边。"""
+    """给主 Graph 添加边与条件路由。"""
 
     builder.add_edge(START, INPUT_GUARD)
     builder.add_conditional_edges(
@@ -162,10 +161,9 @@ def add_workflow_edges(builder: StateGraph) -> StateGraph:
     builder.add_edge(WEB_SEARCH_HITL_REQUEST, WEB_SEARCH_RESULT_READY)
     builder.add_edge(
         [WEB_SEARCH_RESULT_READY, LOCAL_DOCUMENT_SEARCH_TOOL],
-        TOOL_OUTPUT_SANITIZER,
+        SANITIZE_AND_CLUSTER,
     )
-    builder.add_edge(TOOL_OUTPUT_SANITIZER, DEDUPLICATE_AND_CLUSTER)
-    builder.add_edge(DEDUPLICATE_AND_CLUSTER, EVALUATE_EVIDENCE_QUALITY)
+    builder.add_edge(SANITIZE_AND_CLUSTER, EVALUATE_EVIDENCE_QUALITY)
     builder.add_conditional_edges(
         EVALUATE_EVIDENCE_QUALITY,
         route_after_evidence_quality,

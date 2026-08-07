@@ -164,22 +164,38 @@ def evaluate_researchops_summary(outputs: list[dict[str, Any]]) -> ResearchOpsSu
     final_report_rate = mean(1.0 if _has_final_report(output) else 0.0 for output in normalized_outputs)
     persist_success_rate = mean(1.0 if _persist_success(output) else 0.0 for output in normalized_outputs)
     evidence_outputs = [
-        output for output in normalized_outputs if "evidence_sufficient" in output
+        output
+        for output in normalized_outputs
+        if "evidence_sufficient" in output
+        or isinstance(output.get("evidence_sufficiency_result"), dict)
     ]
+
+    def _is_evidence_sufficient(output: dict[str, Any]) -> bool:
+        if "evidence_sufficient" in output:
+            return _bool_value(output["evidence_sufficient"])
+        result = output.get("evidence_sufficiency_result")
+        if isinstance(result, dict):
+            return _bool_value(result.get("sufficient"))
+        return False
+
     evidence_sufficient_rate = (
-        mean(
-            1.0 if _bool_value(output["evidence_sufficient"]) else 0.0
-            for output in evidence_outputs
-        )
+        mean(1.0 if _is_evidence_sufficient(output) else 0.0 for output in evidence_outputs)
         if evidence_outputs
         else 0.0
     )
+
+    def _evidence_score(output: dict[str, Any]) -> float | None:
+        direct = _float_or_none(output.get("evidence_sufficiency_score"))
+        if direct is not None:
+            return direct
+        result = output.get("evidence_sufficiency_result")
+        if isinstance(result, dict):
+            return _float_or_none(result.get("overall_score"))
+        return None
+
     evidence_scores = [
         score
-        for score in (
-            _float_or_none(output.get("evidence_sufficiency_score"))
-            for output in normalized_outputs
-        )
+        for score in (_evidence_score(output) for output in normalized_outputs)
         if score is not None
     ]
     average_evidence_sufficiency_score = mean(evidence_scores) if evidence_scores else 0.0

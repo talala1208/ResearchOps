@@ -70,6 +70,8 @@ class PersistOutputsSmokeTest(unittest.TestCase):
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             self.assertEqual(metrics["executed_mermaid_png_path"], str(png_path))
             self.assertNotIn("executed_mermaid_path", metrics)
+            self.assertEqual(metrics["discarded_candidate_count"], 0)
+            self.assertEqual(metrics["final_citation_count"], 0)
 
 
 if __name__ == "__main__":

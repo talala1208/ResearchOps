@@ -102,4 +102,5 @@ def safety_review(state: ResearchState) -> dict[str, Any]:
             "downgrade_reason": downgrade_reason,
         },
         "final_report": final_report,
+        "report_draft": "",
     }

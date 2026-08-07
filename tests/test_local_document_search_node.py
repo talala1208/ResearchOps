@@ -51,7 +51,6 @@ class LocalDocumentSearchNodeTest(unittest.TestCase):
                         "snippet": "reducer",
                         "published_at": None,
                         "collected_by": "local_document_search",
-                        "is_placeholder": False,
                         "requires_login": False,
                         "blocked_reason": None,
                     }
@@ -72,7 +71,6 @@ class LocalDocumentSearchNodeTest(unittest.TestCase):
                         "snippet": "AI IDE",
                         "published_at": None,
                         "collected_by": "local_structured_search",
-                        "is_placeholder": False,
                         "requires_login": False,
                         "blocked_reason": None,
                     }

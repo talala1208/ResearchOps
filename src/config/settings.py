@@ -39,6 +39,8 @@ DASHSCOPE_MODEL_FIELDS = {
     "search_task_planner": "SEARCH_TASK_PLANNER_MODEL",
     "web_search_subagent": "WEB_SEARCH_SUBAGENT_MODEL",
     "local_document_search": "LOCAL_DOCUMENT_SEARCH_MODEL",
+    "research_report": "RESEARCH_REPORT_MODEL",
+    "research_report_review": "RESEARCH_REPORT_REVIEW_MODEL",
 }
 
 DASHSCOPE_DEEPSEEK_PREFIXES = ("deepseek-v4-",)

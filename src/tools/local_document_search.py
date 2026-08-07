@@ -191,7 +191,6 @@ def query_local_documents_for_task(task: dict[str, Any]) -> list[dict[str, Any]]
                 "snippet": row["snippet"],
                 "published_at": None,
                 "collected_by": "local_document_search",
-                "is_placeholder": False,
                 "requires_login": False,
                 "blocked_reason": None,
                 "local_payload": {

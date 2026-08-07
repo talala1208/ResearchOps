@@ -1,4 +1,4 @@
-"""ResearchOps Agent 的 LangGraph 占位图。"""
+"""ResearchOps Agent 的主 Graph。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from src.workflow.edges import (
     BUILD_EVIDENCE_MATRIX,
     CHECK_EVIDENCE_SUFFICIENCY,
     CHECK_STEP_BUDGET,
-    DEDUPLICATE_AND_CLUSTER,
     EVALUATE_EVIDENCE_QUALITY,
     GENERATE_RESEARCH_REPORT,
     INPUT_GUARD,
@@ -20,8 +19,8 @@ from src.workflow.edges import (
     REQUEST_HUMAN_REVIEW,
     REVIEW_RESEARCH_REPORT,
     SAFETY_REVIEW,
+    SANITIZE_AND_CLUSTER,
     STRATEGY_ITERATION,
-    TOOL_OUTPUT_SANITIZER,
     WEB_SEARCH_SUB_AGENT,
     WEB_SEARCH_RESULT_READY,
     WEB_SEARCH_HITL_REQUEST,
@@ -32,7 +31,6 @@ from src.workflow.nodes import (
     build_evidence_matrix,
     check_evidence_sufficiency,
     check_step_budget,
-    deduplicate_and_cluster,
     evaluate_evidence_quality,
     generate_research_report,
     input_guard,
@@ -42,8 +40,8 @@ from src.workflow.nodes import (
     request_human_review,
     review_research_report,
     safety_review,
+    sanitize_and_cluster,
     strategy_iteration,
-    tool_output_sanitizer,
     web_search_hitl_request,
     web_search_result_ready,
     web_search_sub_agent,
@@ -51,7 +49,7 @@ from src.workflow.nodes import (
 
 
 def build_graph():
-    """构建并编译 ResearchOps Agent 的占位 Graph。"""
+    """构建并编译 ResearchOps Agent 主 Graph。"""
 
     builder = StateGraph(ResearchState, input_schema=ResearchInput)
 
@@ -61,8 +59,7 @@ def build_graph():
     builder.add_node(WEB_SEARCH_HITL_REQUEST, web_search_hitl_request)
     builder.add_node(WEB_SEARCH_RESULT_READY, web_search_result_ready)
     builder.add_node(LOCAL_DOCUMENT_SEARCH_TOOL, local_document_search_tool)
-    builder.add_node(TOOL_OUTPUT_SANITIZER, tool_output_sanitizer)
-    builder.add_node(DEDUPLICATE_AND_CLUSTER, deduplicate_and_cluster)
+    builder.add_node(SANITIZE_AND_CLUSTER, sanitize_and_cluster)
     builder.add_node(EVALUATE_EVIDENCE_QUALITY, evaluate_evidence_quality)
     builder.add_node(REQUEST_HUMAN_REVIEW, request_human_review)
     builder.add_node(BUILD_EVIDENCE_MATRIX, build_evidence_matrix)

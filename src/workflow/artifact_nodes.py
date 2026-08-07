@@ -16,7 +16,7 @@ from src.schemas.state import ResearchState
 NODE_CLASSES = {
     "safety": {
         "input_guard",
-        "tool_output_sanitizer",
+        "sanitize_and_cluster",
         "safety_review",
     },
     "planner": {
@@ -28,7 +28,7 @@ NODE_CLASSES = {
         "local_document_search_tool",
     },
     "evidence": {
-        "deduplicate_and_cluster",
+        "sanitize_and_cluster",
         "evaluate_evidence_quality",
         "build_evidence_matrix",
         "check_evidence_sufficiency",
@@ -185,6 +185,7 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         "evidence_count": len(state.get("evidence_items", {})),
         "final_citation_count": len(state.get("entity_index", {}).get("used_evidence_ids", [])),
         "conflict_count": len(state.get("conflicts", {})),
+        "discarded_candidate_count": state.get("discarded_candidate_count", 0),
         "degraded": state.get("degraded", False),
         "degradation_reason": state.get("degradation_reason"),
         "review_score": state.get("review_result", {}).get("report_score"),

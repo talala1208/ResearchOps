@@ -1,12 +1,18 @@
-"""证据治理、HITL、证据充足性与检索预算节点。"""
+"""证据治理、HITL 观测占位、证据充足性与检索预算节点。"""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections import defaultdict
 from typing import Any
 
+from src.artifacts.evidence_content import (
+    extract_candidate_long_text,
+    persist_evidence_content,
+    shorten_snippet,
+)
 from src.config.settings import get_workflow_config
 from src.schemas.state import ResearchState
 from src.tools.external_agent_workers import call_claude_code_worker, call_codex_worker
@@ -32,6 +38,32 @@ SOURCE_AUTHORITY_SCORE = {
     "traffic_data": 0.55,
     "community": 0.45,
 }
+CONTEXT7_AUTHORITY_WEIGHT = 0.55
+CONTEXT7_FRESHNESS_WEIGHT = 0.1
+CONTEXT7_RELEVANCE_WEIGHT = 0.2
+CONTEXT7_COVERAGE_WEIGHT = 0.15
+CONTEXT7_DEFAULT_AUTHORITY = 0.95
+CONTEXT7_DEFAULT_RELEVANCE = 0.5
+SEMANTIC_CONFLICT_HITL_NEED_SCORE = 6.0
+NUMERIC_CONFLICT_RELATIVE_THRESHOLD = 0.2
+NUMERIC_CONFLICT_ABSOLUTE_MIN = 0.01
+POLARITY_PAIRS: tuple[tuple[str, str], ...] = (
+    ("支持", "不支持"),
+    ("可用", "不可用"),
+    ("开启", "关闭"),
+    ("合规", "违规"),
+    ("允许", "禁止"),
+    ("通过", "失败"),
+    ("上升", "下降"),
+    ("增加", "减少"),
+    ("available", "unavailable"),
+    ("enabled", "disabled"),
+    ("support", "unsupported"),
+    ("allowed", "forbidden"),
+    ("pass", "fail"),
+    ("increase", "decrease"),
+    ("open", "closed"),
+)
 
 
 def _strategy_external_worker_enabled() -> bool:
@@ -56,22 +88,55 @@ def _call_strategy_external_worker(prompt: str) -> dict[str, Any]:
     return json.loads(raw_result)
 
 
-def _stable_unique_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按 URL / 路径、标题、片段去重并保持原顺序。"""
+def _normalize_url_key(value: Any) -> str | None:
+    """规范化 URL/路径，供证据去重。"""
 
-    seen_keys = set()
-    unique_results = []
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.startswith(("http://", "https://")):
+        return normalized.rstrip("/")
+    return normalized
+
+
+def _candidate_richness_key(result: dict[str, Any]) -> tuple[Any, ...]:
+    """同 URL 去重时保留更完整候选。"""
+
+    body = result.get("body")
+    docs = result.get("docs_result")
+    snippet = result.get("snippet") or ""
+    body_len = len(body) if isinstance(body, str) else 0
+    docs_len = len(docs) if isinstance(docs, str) else 0
+    snippet_len = len(snippet) if isinstance(snippet, str) else 0
+    has_body = 1 if body_len > 0 else 0
+    score = _score_or_default(
+        result.get("score"),
+        _score_or_default(result.get("relevance_score"), 0.0),
+    )
+    return (has_body, score, body_len + docs_len, snippet_len)
+
+
+def _stable_unique_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按规范化 URL/路径去重；无 URL 时回退到标题+片段。"""
+
+    best_by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for result in results:
-        key = (
-            result.get("url_or_path", ""),
-            result.get("title", ""),
-            result.get("snippet", ""),
-        )
-        if key in seen_keys:
+        url_key = _normalize_url_key(result.get("url_or_path") or result.get("url"))
+        if url_key is None:
+            key = f"__meta__{(result.get('title', ''), result.get('snippet', ''))}"
+        else:
+            key = url_key
+        existing = best_by_key.get(key)
+        if existing is None:
+            best_by_key[key] = result
+            order.append(key)
             continue
-        seen_keys.add(key)
-        unique_results.append(result)
-    return unique_results
+        if _candidate_richness_key(result) > _candidate_richness_key(existing):
+            best_by_key[key] = result
+    return [best_by_key[key] for key in order]
 
 
 def _score_or_default(value: Any, default: float) -> float:
@@ -86,53 +151,315 @@ def _score_or_default(value: Any, default: float) -> float:
     return max(0.0, min(score, 1.0))
 
 
-def _score_result(result: dict[str, Any]) -> dict[str, float]:
-    """用确定性规则为替代结果打分。"""
+def _table_authority(bucket: str, source_type: str) -> float:
+    """来源权威权重，仅参与 reliability 公式，不写入 EvidenceItem。"""
 
+    if bucket == "context7":
+        return CONTEXT7_DEFAULT_AUTHORITY
+    return SOURCE_AUTHORITY_SCORE.get(source_type, 0.5)
+
+
+def _score_bucket(result: dict[str, Any]) -> str:
+    """按来源分桶，避免跨工具把不可比分数混排。"""
+
+    explicit = result.get("score_bucket")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower()
+    source_name = str(result.get("source_name") or "").lower()
+    if "context7" in source_name:
+        return "context7"
+    if "tavily" in source_name:
+        return "tavily"
+    if "serp" in source_name:
+        return "serpapi"
+    if "playwright" in source_name:
+        return "playwright"
+    return "other"
+
+
+def _score_result(result: dict[str, Any]) -> dict[str, float | str]:
+    """按来源分桶为候选打分。"""
+
+    bucket = _score_bucket(result)
     source_type = result["source_type"]
-    authority_score = _score_or_default(
+    authority_weight = _table_authority(bucket, source_type)
+    source_confidence_score = _score_or_default(
         result.get("source_confidence_score"),
-        SOURCE_AUTHORITY_SCORE.get(source_type, 0.5),
+        authority_weight,
     )
     freshness_score = _score_or_default(
         result.get("freshness_score"),
         0.6 if result.get("published_at") is None else 0.8,
     )
-    relevance_score = _score_or_default(
-        result.get("relevance_score"),
-        0.75 if result.get("snippet") else 0.0,
-    )
-    answer_coverage_score = _score_or_default(
-        result.get("answer_coverage_score"),
-        relevance_score,
-    )
-    reliability_score = round(
-        authority_score * 0.35
-        + freshness_score * 0.15
-        + relevance_score * 0.3
-        + answer_coverage_score * 0.2,
-        4,
-    )
+
+    if bucket == "context7":
+        relevance_score = _score_or_default(
+            result.get("relevance_score"),
+            CONTEXT7_DEFAULT_RELEVANCE,
+        )
+        answer_coverage_score = _score_or_default(
+            result.get("answer_coverage_score"),
+            relevance_score,
+        )
+        reliability_score = round(
+            authority_weight * 0.35
+            + source_confidence_score * 0.2
+            + freshness_score * CONTEXT7_FRESHNESS_WEIGHT
+            + relevance_score * CONTEXT7_RELEVANCE_WEIGHT
+            + answer_coverage_score * CONTEXT7_COVERAGE_WEIGHT,
+            4,
+        )
+    elif bucket == "tavily":
+        provider_score = _score_or_default(
+            result.get("tavily_score"),
+            _score_or_default(result.get("score"), 0.5),
+        )
+        relevance_score = _score_or_default(
+            result.get("relevance_score"),
+            provider_score,
+        )
+        answer_coverage_score = _score_or_default(
+            result.get("answer_coverage_score"),
+            provider_score,
+        )
+        reliability_score = round(
+            authority_weight * 0.1
+            + source_confidence_score * 0.15
+            + freshness_score * 0.15
+            + relevance_score * 0.35
+            + answer_coverage_score * 0.25,
+            4,
+        )
+    elif bucket in {"serpapi", "playwright"}:
+        relevance_score = _score_or_default(
+            result.get("relevance_score"),
+            0.75 if result.get("snippet") or result.get("body") else 0.0,
+        )
+        answer_coverage_score = _score_or_default(
+            result.get("answer_coverage_score"),
+            relevance_score,
+        )
+        body_boost = 0.05 if isinstance(result.get("body"), str) and result["body"].strip() else 0.0
+        reliability_score = round(
+            min(
+                1.0,
+                authority_weight * 0.2
+                + source_confidence_score * 0.15
+                + freshness_score * 0.15
+                + relevance_score * 0.3
+                + answer_coverage_score * 0.2
+                + body_boost,
+            ),
+            4,
+        )
+    else:
+        relevance_score = _score_or_default(
+            result.get("relevance_score"),
+            0.75 if result.get("snippet") else 0.0,
+        )
+        answer_coverage_score = _score_or_default(
+            result.get("answer_coverage_score"),
+            relevance_score,
+        )
+        reliability_score = round(
+            authority_weight * 0.2
+            + source_confidence_score * 0.15
+            + freshness_score * 0.15
+            + relevance_score * 0.3
+            + answer_coverage_score * 0.2,
+            4,
+        )
 
     return {
-        "authority_score": authority_score,
         "freshness_score": freshness_score,
         "relevance_score": relevance_score,
         "answer_coverage_score": answer_coverage_score,
-        "source_confidence_score": authority_score,
+        "source_confidence_score": source_confidence_score,
         "reliability_score": reliability_score,
+        "score_bucket": bucket,
     }
 
 
-def deduplicate_and_cluster(state: ResearchState) -> dict[str, Any]:
-    """对清洗后的候选结果去重并按 `question_id` 聚类。
+def _is_admissible_candidate(result: dict[str, Any]) -> bool:
+    """判断候选是否可进入证据目录。"""
 
-    读取：`sanitized_results`
-    写入：`evidence_clusters`
+    if result.get("requires_login") is True:
+        return False
+    blocked_reason = result.get("blocked_reason")
+    if isinstance(blocked_reason, str) and blocked_reason.strip():
+        return False
+    url_or_path = result.get("url_or_path") or result.get("url")
+    if isinstance(url_or_path, str) and url_or_path.strip().startswith("placeholder://"):
+        return False
+    structured_payload = result.get("structured_payload")
+    if isinstance(structured_payload, dict) and structured_payload.get(
+        "matched_product_count"
+    ) == 0:
+        return False
+    return True
+
+
+def _evidence_conflict_text(item: dict[str, Any]) -> str:
+    """冲突检测用文本：标题 + 摘要。"""
+
+    title = item.get("title") or ""
+    snippet = item.get("snippet") or ""
+    return f"{title}\n{snippet}".strip().lower()
+
+
+def _contains_polarity_term(text: str, term: str, opposing: str) -> bool:
+    """判断文本是否包含极性词；若对立词更长且已命中，则从残文再判。"""
+
+    if term not in text:
+        return False
+    if opposing in text and len(opposing) > len(term):
+        residual = text.replace(opposing, " ")
+        return term in residual
+    return True
+
+
+def _has_polarity_conflict(text_a: str, text_b: str) -> bool:
+    """两条文本是否分别命中同一对立词对的两侧。"""
+
+    for left, right in POLARITY_PAIRS:
+        left_l = left.lower()
+        right_l = right.lower()
+        a_left = _contains_polarity_term(text_a, left_l, right_l)
+        a_right = _contains_polarity_term(text_a, right_l, left_l)
+        b_left = _contains_polarity_term(text_b, left_l, right_l)
+        b_right = _contains_polarity_term(text_b, right_l, left_l)
+        if (a_left and b_right) or (a_right and b_left):
+            return True
+    return False
+
+
+def _extract_anchored_numbers(text: str) -> list[tuple[str, float]]:
+    """抽取「邻近关键词 + 数值」对，用于同锚点数字矛盾。"""
+
+    pattern = re.compile(
+        r"([A-Za-z\u4e00-\u9fff]{1,12})\s*[:=：]?\s*"
+        r"(-?\d+(?:\.\d+)?)\s*%?",
+        re.UNICODE,
+    )
+    anchored: list[tuple[str, float]] = []
+    for match in pattern.finditer(text):
+        anchor = match.group(1).strip().lower()
+        if not anchor:
+            continue
+        try:
+            value = float(match.group(2))
+        except ValueError:
+            continue
+        anchored.append((anchor, value))
+    return anchored
+
+
+def _has_numeric_conflict(text_a: str, text_b: str) -> bool:
+    """同锚点数值相对差异过大则视为冲突。"""
+
+    numbers_a = _extract_anchored_numbers(text_a)
+    numbers_b = _extract_anchored_numbers(text_b)
+    if not numbers_a or not numbers_b:
+        return False
+    for anchor_a, value_a in numbers_a:
+        for anchor_b, value_b in numbers_b:
+            if anchor_a != anchor_b:
+                continue
+            denom = max(abs(value_a), abs(value_b), NUMERIC_CONFLICT_ABSOLUTE_MIN)
+            relative = abs(value_a - value_b) / denom
+            if (
+                relative >= NUMERIC_CONFLICT_RELATIVE_THRESHOLD
+                and abs(value_a - value_b) >= NUMERIC_CONFLICT_ABSOLUTE_MIN
+            ):
+                return True
+    return False
+
+
+def _detect_semantic_conflicts(
+    question_id: str,
+    evidence_items: dict[str, dict[str, Any]],
+    evidence_ids: list[str],
+    *,
+    conflict_counter_start: int,
+    hitl_conflict_threshold: float,
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """对同题证据做极简语义冲突检测；返回新增冲突与下一计数。"""
+
+    conflicts: dict[str, dict[str, Any]] = {}
+    conflict_counter = conflict_counter_start
+    if len(evidence_ids) < 2:
+        return conflicts, conflict_counter
+
+    texts = {
+        evidence_id: _evidence_conflict_text(evidence_items[evidence_id])
+        for evidence_id in evidence_ids
+    }
+    emitted_pairs: set[frozenset[str]] = set()
+
+    for index, left_id in enumerate(evidence_ids):
+        for right_id in evidence_ids[index + 1 :]:
+            pair_key = frozenset({left_id, right_id})
+            if pair_key in emitted_pairs:
+                continue
+            left_text = texts[left_id]
+            right_text = texts[right_id]
+            reasons: list[str] = []
+            if _has_polarity_conflict(left_text, right_text):
+                reasons.append("对立极性词命中")
+            if _has_numeric_conflict(left_text, right_text):
+                reasons.append("同锚点数值矛盾")
+            if not reasons:
+                continue
+            emitted_pairs.add(pair_key)
+            related = [left_id, right_id]
+            preferred = max(
+                related,
+                key=lambda eid: float(evidence_items[eid]["reliability_score"]),
+            )
+            conflict_id = f"C{conflict_counter}"
+            conflict_counter += 1
+            hitl_need_score = SEMANTIC_CONFLICT_HITL_NEED_SCORE
+            conflicts[conflict_id] = {
+                "conflict_id": conflict_id,
+                "question_id": question_id,
+                "evidence_ids": related,
+                "conflict_summary": (
+                    f"极简语义冲突（{'、'.join(reasons)}）："
+                    f"{left_id} 与 {right_id}"
+                ),
+                "preferred_evidence_id": preferred,
+                "hitl_need_score": hitl_need_score,
+                "hitl_triggered": hitl_need_score > hitl_conflict_threshold,
+            }
+
+    return conflicts, conflict_counter
+
+
+def sanitize_and_cluster(state: ResearchState) -> dict[str, Any]:
+    """合并 Web 与本地检索结果，准入过滤、标记不可信、去重并按 `question_id` 聚类。
+
+    读取：`web_search_results`、`local_document_results`
+    写入：`evidence_clusters`、`discarded_candidate_count`，并清空两类上游结果
     """
 
-    sanitized_results = state.get("sanitized_results", [])
-    unique_results = _stable_unique_results(sanitized_results)
+    raw_candidates: list[dict[str, Any]] = []
+    discarded_candidate_count = 0
+    for result in (
+        *state.get("web_search_results", []),
+        *state.get("local_document_results", []),
+    ):
+        if not _is_admissible_candidate(result):
+            discarded_candidate_count += 1
+            continue
+        raw_candidates.append(
+            {
+                **result,
+                "trust_boundary": "untrusted_tool_output",
+                "sanitized": True,
+            }
+        )
+
+    unique_results = _stable_unique_results(raw_candidates)
 
     clusters_by_question_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for result in unique_results:
@@ -150,17 +477,18 @@ def deduplicate_and_cluster(state: ResearchState) -> dict[str, Any]:
     ]
 
     return {
-        **record_node(state, "deduplicate_and_cluster"),
+        **record_node(state, "sanitize_and_cluster"),
         "evidence_clusters": evidence_clusters,
-        "sanitized_results": [],
+        "discarded_candidate_count": discarded_candidate_count,
+        "web_search_results": [],
+        "local_document_results": [],
     }
 
 
 def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
-    """把候选结果转换为标准证据，并识别简单冲突。
+    """把候选结果转换为标准证据，并识别极简语义冲突。
 
-    当前用确定性规则替代 LLM judge。后续可接入
-    `evidence_quality_evaluator.yml`。
+    `evidence_items` / `conflicts` 整表替换本轮结果。
     """
 
     sub_questions = state["sub_questions"]
@@ -168,7 +496,7 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
     evidence_ids_by_question_id: dict[str, list[str]] = {
         question_id: [] for question_id in sub_questions
     }
-    conflicts = {}
+    conflicts: dict[str, dict[str, Any]] = {}
     conflict_ids_by_question_id: dict[str, list[str]] = {
         question_id: [] for question_id in sub_questions
     }
@@ -181,22 +509,19 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
         if question_id not in sub_questions:
             raise ValueError(f"证据聚类引用了不存在的 question_id：{question_id}")
 
-        source_types_seen: dict[str, list[str]] = defaultdict(list)
         for candidate in cluster["candidates"]:
             evidence_id = f"E{evidence_counter}"
             evidence_counter += 1
             scores = _score_result(candidate)
-            evidence_items[evidence_id] = {
+            evidence_item: dict[str, Any] = {
                 "evidence_id": evidence_id,
                 "question_id": question_id,
                 "source_type": candidate["source_type"],
                 "source_name": candidate["source_name"],
                 "url_or_path": candidate["url_or_path"],
                 "title": candidate["title"],
-                "snippet": candidate["snippet"],
                 "published_at": candidate.get("published_at"),
                 "collected_by": candidate["collected_by"],
-                "authority_score": scores["authority_score"],
                 "freshness_score": scores["freshness_score"],
                 "relevance_score": scores["relevance_score"],
                 "answer_coverage_score": scores["answer_coverage_score"],
@@ -205,28 +530,38 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
                 "score_reason": candidate.get("score_reason"),
                 "used_in_final_report": False,
             }
+            long_text = extract_candidate_long_text(candidate)
+            existing_snippet = candidate.get("snippet") or ""
+            if long_text:
+                evidence_item["content_path"] = persist_evidence_content(
+                    evidence_id,
+                    long_text,
+                )
+                evidence_item["snippet"] = shorten_snippet(
+                    existing_snippet or long_text
+                )
+            else:
+                evidence_item["snippet"] = shorten_snippet(existing_snippet)
+            library_id = candidate.get("library_id")
+            if isinstance(library_id, str) and library_id.strip():
+                evidence_item["library_id"] = library_id
+            if scores.get("score_bucket"):
+                evidence_item["score_bucket"] = scores["score_bucket"]
+            scored_by = candidate.get("scored_by")
+            if isinstance(scored_by, str) and scored_by.strip():
+                evidence_item["scored_by"] = scored_by
+            evidence_items[evidence_id] = evidence_item
             evidence_ids_by_question_id[question_id].append(evidence_id)
-            source_types_seen[candidate["source_type"]].append(evidence_id)
 
-        if len(source_types_seen) >= 2:
-            conflict_id = f"C{conflict_counter}"
-            conflict_counter += 1
-            related_evidence_ids = [
-                evidence_id
-                for evidence_ids in source_types_seen.values()
-                for evidence_id in evidence_ids
-            ]
-            hitl_need_score = 6.0
-            conflicts[conflict_id] = {
-                "conflict_id": conflict_id,
-                "question_id": question_id,
-                "evidence_ids": related_evidence_ids,
-                "conflict_summary": "替代规则：同一子问题存在多个来源类型，后续真实实现需判断是否语义冲突。",
-                "preferred_evidence_id": related_evidence_ids[0] if related_evidence_ids else None,
-                "hitl_need_score": hitl_need_score,
-                "hitl_triggered": hitl_need_score > workflow_config.hitl_conflict_threshold,
-            }
-            conflict_ids_by_question_id[question_id].append(conflict_id)
+        question_conflicts, conflict_counter = _detect_semantic_conflicts(
+            question_id,
+            evidence_items,
+            evidence_ids_by_question_id[question_id],
+            conflict_counter_start=conflict_counter,
+            hitl_conflict_threshold=workflow_config.hitl_conflict_threshold,
+        )
+        conflicts.update(question_conflicts)
+        conflict_ids_by_question_id[question_id].extend(question_conflicts.keys())
 
     hitl_required = any(
         conflict["hitl_triggered"] for conflict in conflicts.values()
@@ -249,9 +584,9 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
 
 
 def request_human_review(state: ResearchState) -> dict[str, Any]:
-    """动态 HITL 人工确认替代节点。
+    """冲突 HITL 观测占位节点。
 
-    当前不真正暂停，只把需要 HITL 的冲突记录为未完成决策。
+    不真正暂停，不改写证据，不因未完成而降级；仅记录观测事实。
     """
 
     decisions = []
@@ -264,7 +599,7 @@ def request_human_review(state: ResearchState) -> dict[str, Any]:
                 "conflict_id": conflict["conflict_id"],
                 "question_id": conflict["question_id"],
                 "completed": False,
-                "decision": "placeholder_no_user_decision",
+                "decision": "observation_placeholder_no_user_decision",
                 "reason": conflict["conflict_summary"],
             }
         )
@@ -280,6 +615,7 @@ def build_evidence_matrix(state: ResearchState) -> dict[str, Any]:
 
     读取：`sub_questions`、`evidence_items`、`entity_index`
     写入：`evidence_matrix`
+    不在此标记 `used_in_final_report`（由报告生成按实际引用写入）。
     """
 
     sub_questions = state["sub_questions"]
@@ -290,8 +626,7 @@ def build_evidence_matrix(state: ResearchState) -> dict[str, Any]:
     )
 
     evidence_matrix = {}
-    used_evidence_ids = []
-    for question_id, sub_question in sub_questions.items():
+    for question_id in sub_questions:
         evidence_ids = evidence_ids_by_question_id.get(question_id, [])
         for evidence_id in evidence_ids:
             if evidence_id not in evidence_items:
@@ -306,35 +641,18 @@ def build_evidence_matrix(state: ResearchState) -> dict[str, Any]:
         source_types = sorted(
             {evidence_items[evidence_id]["source_type"] for evidence_id in evidence_ids}
         )
-        used_evidence_ids.extend(evidence_ids)
 
         evidence_matrix[question_id] = {
             "question_id": question_id,
-            "question": sub_question["question"],
-            "priority": sub_question["priority"],
             "evidence_ids": evidence_ids,
             "high_quality_evidence_ids": high_quality_evidence_ids,
             "covered_source_types": source_types,
             "conflict_ids": conflict_ids_by_question_id.get(question_id, []),
         }
 
-    evidence_items_with_usage = {
-        evidence_id: {
-            **evidence_item,
-            "used_in_final_report": evidence_id in used_evidence_ids,
-        }
-        for evidence_id, evidence_item in evidence_items.items()
-    }
-    entity_index = {
-        **state["entity_index"],
-        "used_evidence_ids": used_evidence_ids,
-    }
-
     return {
         **record_node(state, "build_evidence_matrix"),
-        "evidence_items": evidence_items_with_usage,
         "evidence_matrix": evidence_matrix,
-        "entity_index": entity_index,
     }
 
 
@@ -430,11 +748,6 @@ def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
 
     return {
         **record_node(state, "check_evidence_sufficiency"),
-        "question_evidence_status": question_evidence_status,
-        "evidence_sufficiency_score": evidence_sufficiency_score,
-        "evidence_sufficiency_threshold": EVIDENCE_SUFFICIENCY_THRESHOLD,
-        "evidence_sufficient": evidence_sufficient,
-        "insufficient_question_ids": insufficient_question_ids,
         "evidence_sufficiency_result": {
             "sufficient": evidence_sufficient,
             "overall_score": evidence_sufficiency_score,
@@ -452,7 +765,7 @@ def check_evidence_sufficiency(state: ResearchState) -> dict[str, Any]:
 def check_step_budget(state: ResearchState) -> dict[str, Any]:
     """检索预算检查节点。
 
-    读取：`search_steps`、`max_search_steps`、`insufficient_question_ids`
+    读取：`search_steps`、`max_search_steps`、`evidence_sufficiency_result`
     写入：`step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`
     """
 
@@ -460,7 +773,9 @@ def check_step_budget(state: ResearchState) -> dict[str, Any]:
     search_steps = state.get("search_steps", 0)
     max_search_steps = state.get("max_search_steps", workflow_config.max_search_steps)
     search_budget_remaining = max(max_search_steps - search_steps, 0)
-    insufficient_question_ids = state["insufficient_question_ids"]
+    insufficient_question_ids = state["evidence_sufficiency_result"][
+        "insufficient_question_ids"
+    ]
     step_budget_exhausted = search_budget_remaining <= 0
 
     step_budget_reason = None
@@ -487,9 +802,17 @@ def strategy_iteration(state: ResearchState) -> dict[str, Any]:
     """
 
     sub_questions = state["sub_questions"]
-    insufficient_question_ids = state["insufficient_question_ids"]
-    question_evidence_status = state["question_evidence_status"]
-    previous_search_tasks = state.get("search_tasks", [])
+    sufficiency = state["evidence_sufficiency_result"]
+    insufficient_question_ids = sufficiency["insufficient_question_ids"]
+    question_evidence_status = sufficiency["question_status"]
+    previous_search_tasks = [
+        {
+            "task_id": task["task_id"],
+            "query": task["query"],
+            "source_type": task["source_type"],
+        }
+        for task in state.get("search_tasks", [])
+    ]
 
     for question_id in insufficient_question_ids:
         if question_id not in sub_questions:
