@@ -337,10 +337,12 @@ class ResearchReportNodesTest(unittest.TestCase):
                 return self
 
             def invoke(self, messages):  # noqa: ANN001
+                captured_prompts.append(messages[1][1])
                 return FakeResponse()
 
         mock_config = MagicMock()
         mock_config.review_pass_score = 0.75
+        captured_prompts: list[str] = []
 
         with (
             patch(
@@ -361,6 +363,8 @@ class ResearchReportNodesTest(unittest.TestCase):
             result["review_result"]["revision_suggestions"],
             ["补充引用"],
         )
+        self.assertIn("比较两款 AI 编程助手", captured_prompts[0])
+        self.assertIn("用户最初的研究问题", captured_prompts[0])
 
 
 class CitedEvidenceAppendixTest(unittest.TestCase):

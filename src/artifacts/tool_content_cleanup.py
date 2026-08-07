@@ -1,7 +1,7 @@
 """代码路径工具结果的确定性清洗。
 
 Tavily / Context7 / Playwright / DevTools 不经汇总 LLM，落盘或进 State 前做轻量清洗：
-解包 text blocks、规范空白、截断；不做脆弱的“提主文”启发式。
+解包 text blocks、规范空白、截断；Playwright accessibility snapshot 另做确定性角色过滤。
 """
 
 from __future__ import annotations
@@ -16,6 +16,107 @@ _MULTI_SPACES = re.compile(r"[ \t]{2,}")
 _PLAYWRIGHT_NOISE_LINES = re.compile(
     r"^(skip to (main )?content|sign in|log in|cookie(s)?|accept all|拒绝|登录|注册)\s*$",
     re.IGNORECASE,
+)
+_PLAYWRIGHT_A11Y_HINT = re.compile(
+    r"(?:###\s*Snapshot|\[ref=e\d+\]|^\s*-\s+(?:main|article|heading|paragraph)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PAGE_URL_RE = re.compile(r"^-\s*Page URL:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_PAGE_TITLE_RE = re.compile(r"^-\s*Page Title:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# Playwright a11y 行：- role "name" [attrs]: trailing  或  - 'role "name" [attrs]'
+_A11Y_ROLE_LINE_RE = re.compile(
+    r"""^\s*-\s+'?
+        (?P<role>[A-Za-z][\w-]*)
+        (?:\s+(?P<quoted>"(?:\\.|[^"\\])*"))?
+        (?P<attrs>(?:\s+\[[^\]]+\])*)
+        \s*'?
+        (?:\s*:\s*(?P<trailing>.*))?
+        \s*$""",
+    re.VERBOSE,
+)
+_A11Y_URL_LINE_RE = re.compile(r"^\s*-\s*/url\s*:", re.IGNORECASE)
+_A11Y_MAIN_START_RE = re.compile(
+    r"^\s*-\s+'?(?:main|article)\b",
+    re.IGNORECASE,
+)
+# 仅在页脚地标结束；breadcrumb 等 navigation 常嵌在 article 内，不能当结束符
+_A11Y_MAIN_END_RE = re.compile(
+    r"^\s*-\s+'?(?:contentinfo)\b",
+    re.IGNORECASE,
+)
+
+# 始终丢弃的 chrome / 控件角色
+_A11Y_CHROME_ROLES = frozenset(
+    {
+        "navigation",
+        "banner",
+        "complementary",
+        "contentinfo",
+        "menu",
+        "menuitem",
+        "menubar",
+        "toolbar",
+        "tablist",
+        "tab",
+        "button",
+        "textbox",
+        "searchbox",
+        "checkbox",
+        "radio",
+        "switch",
+        "slider",
+        "combobox",
+        "listbox",
+        "option",
+        "dialog",
+        "alertdialog",
+        "status",
+        "progressbar",
+        "img",
+        "image",
+        "link",  # 导航/侧栏链接噪声大；正文靠 paragraph/heading
+    }
+)
+# 结构节点：无尾随文本则跳过
+_A11Y_STRUCTURAL_ROLES = frozenset(
+    {
+        "generic",
+        "group",
+        "list",
+        "listitem",
+        "table",
+        "row",
+        "rowgroup",
+        "grid",
+        "gridcell",
+        "main",
+        "article",
+        "region",
+        "document",
+        "presentation",
+        "none",
+    }
+)
+# 优先保留的正文角色
+_A11Y_CONTENT_ROLES = frozenset(
+    {
+        "heading",
+        "paragraph",
+        "text",
+        "time",
+        "blockquote",
+        "caption",
+        "cell",
+        "columnheader",
+        "rowheader",
+        "term",
+        "definition",
+        "code",
+        "emphasis",
+        "strong",
+        "mark",
+        "note",
+    }
 )
 
 
@@ -107,12 +208,149 @@ def clean_context7_resolve(value: Any, *, max_chars: int) -> str:
     return clean_plain_text(value, max_chars=max_chars)
 
 
+def _looks_like_playwright_a11y(text: str) -> bool:
+    """判断是否为 Playwright accessibility snapshot 形态。"""
+
+    return _PLAYWRIGHT_A11Y_HINT.search(text) is not None
+
+
+def _unquote_a11y_name(value: str | None) -> str:
+    """去掉 a11y 节点名两侧引号并还原转义。"""
+
+    if not value:
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').strip()
+
+
+def _extract_playwright_page_meta(text: str) -> list[str]:
+    """提取 Page URL / Title 作为短元数据头。"""
+
+    parts: list[str] = []
+    title = _PAGE_TITLE_RE.search(text)
+    if title:
+        parts.append(f"Title: {title.group(1).strip()}")
+    url = _PAGE_URL_RE.search(text)
+    if url:
+        parts.append(f"URL: {url.group(1).strip()}")
+    return parts
+
+
+def _slice_playwright_main_region(lines: list[str]) -> list[str]:
+    """若存在 main/article，截取到下一 chrome 地标或文末。"""
+
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if _A11Y_MAIN_START_RE.match(line):
+            start = index
+            break
+    if start is None:
+        return lines
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if _A11Y_MAIN_END_RE.match(lines[index]):
+            end = index
+            break
+    return lines[start:end]
+
+
+def _extract_a11y_line_text(line: str) -> str | None:
+    """从单行 a11y 节点抽取可读文本；噪声行返回 None。"""
+
+    stripped = line.strip()
+    if not stripped or stripped.startswith("```"):
+        return None
+    if _A11Y_URL_LINE_RE.match(stripped):
+        return None
+    if stripped.startswith("###"):
+        return None
+
+    match = _A11Y_ROLE_LINE_RE.match(stripped)
+    if match is None:
+        # 非角色行（如 "text: ..." 已被 role=text 覆盖）；保留较长纯文本
+        if stripped.startswith("-"):
+            return None
+        if len(stripped) >= 20 and not stripped.startswith("["):
+            return stripped
+        return None
+
+    role = match.group("role").lower()
+    quoted = _unquote_a11y_name(match.group("quoted"))
+    trailing = (match.group("trailing") or "").strip().strip("'").strip()
+    if trailing.startswith('"') and trailing.endswith('"') and len(trailing) >= 2:
+        trailing = trailing[1:-1].strip()
+
+    if role in _A11Y_CHROME_ROLES:
+        return None
+
+    text = trailing or quoted
+    if not text:
+        return None
+
+    if role in _A11Y_STRUCTURAL_ROLES and len(text) < 40:
+        return None
+
+    if role in _A11Y_CONTENT_ROLES or role in _A11Y_STRUCTURAL_ROLES or len(text) >= 40:
+        return text
+    return None
+
+
+def extract_playwright_readable_text(text: str) -> str:
+    """把 Playwright snapshot / 纯文本压成报告可用的可读正文。"""
+
+    if not text or not text.strip():
+        return ""
+    if not _looks_like_playwright_a11y(text):
+        return text
+
+    meta = _extract_playwright_page_meta(text)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    region = _slice_playwright_main_region(lines)
+
+    extracted: list[str] = []
+    seen: set[str] = set()
+    for line in region:
+        piece = _extract_a11y_line_text(line)
+        if not piece:
+            continue
+        # 跳过与 Title 元数据完全重复的首个超长 heading
+        if piece in seen:
+            continue
+        seen.add(piece)
+        extracted.append(piece)
+
+    if not extracted:
+        # main 切片过严或角色未命中时，回退全量抽取
+        for line in lines:
+            piece = _extract_a11y_line_text(line)
+            if not piece or piece in seen:
+                continue
+            seen.add(piece)
+            extracted.append(piece)
+
+    if not extracted:
+        return text
+
+    body = "\n".join(extracted)
+    if meta:
+        return "\n".join([*meta, "", body])
+    return body
+
+
 def clean_playwright_body(value: Any, *, max_chars: int) -> str:
-    """清洗 Playwright 页面正文：去空白、去掉极短导航噪声行、截断。"""
+    """清洗 Playwright 页面正文：a11y 角色过滤 / 去导航噪声，再截断。"""
 
     text = normalize_whitespace(unwrap_text_content(value))
     if not text:
         return ""
+    text = extract_playwright_readable_text(text)
+    text = normalize_whitespace(text)
+    if not text:
+        return ""
+
     kept_lines: list[str] = []
     for line in text.split("\n"):
         stripped = line.strip()

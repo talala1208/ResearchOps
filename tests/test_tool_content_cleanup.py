@@ -146,6 +146,47 @@ class ToolContentCleanupTest(unittest.TestCase):
         self.assertNotIn("Skip to content", body)
         self.assertNotIn("Sign in", body)
 
+    def test_playwright_a11y_snapshot_keeps_article_drops_chrome(self) -> None:
+        """accessibility snapshot：导航/按钮不占截断预算，正文优先保留。"""
+
+        chrome = "\n".join(
+            f' - link "NavItem{i}" [ref=e{i}] [cursor=pointer]:\n - /url: /n{i}'
+            for i in range(60)
+        )
+        snapshot = f"""### Page
+- Page URL: https://example.com/guide/pricing
+- Page Title: AI Tools Pricing 2026
+### Snapshot
+```yaml
+- banner [ref=e0]:
+ - navigation "Main" [ref=e1]:
+{chrome}
+ - button "Subscribe" [ref=e200]
+ - textbox "Email address" [ref=e201]
+ - main [ref=e300]:
+ - article [ref=e301]:
+ - navigation "Breadcrumb" [ref=e302]:
+ - link "Home" [ref=e303]
+ - heading "AI Tools Pricing 2026" [level=1] [ref=e304]
+ - time [ref=e305]: Updated April 24, 2026
+ - paragraph [ref=e306]: Cursor Pro costs $20 per month with agent mode and a 200K context window.
+ - paragraph [ref=e307]: GitHub Copilot Individual is $10 monthly; Business plans start at $19 per user.
+ - paragraph [ref=e308]: Windsurf keeps a strong free tier for casual developers in 2026.
+ - contentinfo [ref=e400]:
+ - link "Privacy" [ref=e401]
+```
+"""
+        body = clean_playwright_body(snapshot, max_chars=600)
+        self.assertIn("Cursor Pro costs $20", body)
+        self.assertIn("GitHub Copilot Individual is $10", body)
+        self.assertIn("Windsurf keeps a strong free tier", body)
+        self.assertIn("Title: AI Tools Pricing 2026", body)
+        self.assertNotIn("NavItem0", body)
+        self.assertNotIn("Subscribe", body)
+        self.assertNotIn("Email address", body)
+        self.assertNotIn("/url:", body)
+        self.assertNotIn("[ref=e", body)
+
     def test_devtools_observation_is_compact(self) -> None:
         compact = compact_devtools_observation(
             {
