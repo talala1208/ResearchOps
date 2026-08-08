@@ -6,6 +6,7 @@
 
 说明：
     该脚本会真实调用 Graph，因此会触发已接入的 LLM 节点。
+    检索、报告 Review 和安全修正预算统一从 .env 读取。
     输出报告会写入 outputs/reports/，运行指标会写入 outputs/runs/。
 """
 
@@ -31,14 +32,7 @@ def main() -> None:
 
     user_query = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_QUERY
 
-    result = graph.invoke(
-        {
-            "user_query": user_query,
-            "max_search_steps": 3,
-            "max_review_revisions": 1,
-            "max_safety_revisions": 1,
-        }
-    )
+    result = graph.invoke({"user_query": user_query})
 
     print("\n=== Smoke Result ===")
     print(f"final_report_path: {result.get('final_report_path')}")

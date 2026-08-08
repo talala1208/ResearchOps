@@ -20,4 +20,4 @@ outputs/
 
 # 缓存文件等
 .playwright-mcp/
-__pycache__
+__pycache__/

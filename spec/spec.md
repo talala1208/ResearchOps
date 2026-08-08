@@ -1,6 +1,6 @@
 # ResearchOps Agent 规格
 
-> 状态：草案 · 版本：0.4.5 · 更新日期：2026-08-07
+> 状态：草案 · 版本：0.4.7 · 更新日期：2026-08-08
 > 本文件是 ResearchOps Agent 当前需求、行为边界、核心契约与验收标准的唯一事实来源。
 
 ## 1. 项目概要
@@ -125,7 +125,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations；证据上下文为**全量短目录 + 按题精选落盘长文**（见报告证据供给） |
 | `review_research_report` | `user_query`、`research_goal`、`report_draft`、`evidence_items` | `review_result` | LLM 结构化质量 Review；锚定 `user_query`，只评**同证据可修正**项：问题对齐、引用可追溯、边界披露与过度推断；**不**再评「证据是否充足 / 来源是否够」（那是上游 `check_evidence_sufficiency` 的职责）；`revision_suggestions` 须可在现有证据上落实（改结构、补引用、降调、写 limitations），禁止要求补搜；不评估安全边界；`degraded=true` 时直接放行 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count`、`evidence_items`、`entity_index` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文；定稿时由代码追加引用证据附录 |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 当前为线性示意（由 `executed_nodes` 列表生成，不还原 fan-out/fan-in）；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 按主图拓扑生成：还原 Web/本地 fan-out 与汇聚 fan-in，标注循环边，未执行节点/边以虚线与 `skipped` 样式保留；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
 
 ### 检索工具契约
@@ -203,7 +203,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - `review_research_report` 负责研究质量中的**写法与可核验性**，不负责安全审查，也不负责证据充足性；评价须锚定用户最初 `user_query`（是否答到问题、有无偏题/漏答、引用与边界是否成立），不以空泛文笔点评替代，不得因「证据数量/来源不够」单独 fail（充足性已由上游判定）；`revision_suggestions` 只能是同证据可执行的改写指引；不通过且预算未耗尽时，下一次生成必须消费这些建议。
 - `safety_review` 负责安全边界，不负责研究质量评分；安全不通过再生成时，报告 Prompt 须附带风险与保守改写约束。
 - Web HITL 与冲突 HITL 均为观测占位：写入决策/观察记录与 metrics，不构成安全闭环，当前版本忽略未完成 HITL，不因此降级。
-- 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点；当前为线性示意，不需要保存 `.mmd` 文件。
+- 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点；图以 `edges.py` 主拓扑为骨架，叠加本次 `executed_nodes` 推断已走边，需区分并行、汇聚、循环与未执行路径；不保存 `.mmd` 文件。
 
 
 
@@ -255,9 +255,12 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 
 ### 对外入口
 
+- `README.md`：面向项目使用者和面试演示的唯一快速入口，说明架构、安装、配置、离线验证、真实 smoke、产物与已知限制。
 - `src.workflow.graph.graph`：LangGraph 编译后的主图对象。
 - `scripts/export_graph_mermaid.py`：导出当前静态编排图 PNG 到 `outputs/runs/researchops_graph.png`。
 - `scripts/run_smoke.py`：调用主 Graph 的真实 LLM 手动 smoke，不属于默认离线测试。
+- `examples/sample_report.md`：可提交、可直接查看的真实报告结构样例，不作为最新外部事实来源。
+- `examples/evaluation_cases.jsonl`：20 条固定评测输入及预期输出类型，不保存实测指标。
 - 后续 CLI 或 LangGraph API Server 入口必须调用 `src.workflow.graph.graph`，不得复制 Graph 编排逻辑。
 - LangGraph Studio 启动相关文件：`scripts/run_langgraph_dev.sh`、`langgraph.json`。
 
@@ -472,6 +475,12 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `web_hitl_trigger_count_by_source`
   - `executed_mermaid_png_path`
 - `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；`executed_mermaid` 只保留在 State，不保存 `.mmd` 文件；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
+- 实际运行图生成规则：
+  - 节点集合固定为主图全部业务节点；已执行节点按职责着色，未执行节点使用 `skipped` 虚线样式。
+  - 边集合固定为主图拓扑；已走边用实线，未走边用虚线并标注「未执行」。
+  - `plan_research` 到 Web/本地的两条出边标注「并行」；两侧进入 `sanitize_and_cluster` 的入边标注「汇聚」。
+  - `strategy_iteration → plan_research`、`review_research_report → generate_research_report`、`safety_review → prepare_degraded_report` 标注「循环」；节点被多次执行时在标签中显示 `×N`。
+  - 并行检索节点放入 `parallel_retrieval` 子图，便于识别 fan-out / fan-in 区域。
 - 当前 evaluator：
   - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 观测指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
   - `research_report_pairwise_preference`：LLM-as-Judge Pairwise A/B，从回答问题、证据支撑、覆盖、限制披露、引用、结构和安全七个维度比较报告。
@@ -479,6 +488,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果；没有触发外部 worker 的 run 标记为 `not_applicable`。
 - 当前 LangSmith dataset 定义：`researchops-input-guard-v1`、`researchops-standard-research-v1`、`researchops-url-web-search-v1`、`researchops-local-and-structured-v1`、`researchops-edge-cases-v1`。
 - `src/dataset` 提供 dataset 创建、样例追加、split 管理和 Pairwise A/B 运行脚本；均为手动入口，不进入主 Graph。
+- `examples/evaluation_cases.jsonl` 固定 20 条跨版本评测样例；每条包含稳定 `case_id`、`scene`、唯一 Graph 输入 `user_query`、`expected_outcome`、引用要求、所需能力和人工复核说明。该文件只定义评测输入与预期类型；成功率、降级率、延迟、Token 和引用有效率由后续真实运行统计，不在当前版本预填。
 - LangSmith Trace metadata 后续应记录：
   - `graph_version`
   - `prompt_version`
@@ -500,6 +510,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - [ ] 真实 LLM 全链路 invoke 由手动 smoke 验证，不进入默认离线测试。
 - [x] 静态编排图脚本和 `outputs/runs/researchops_graph.png` 已存在。
 - [x] `persist_outputs` 保存报告、metrics 和实际运行链路 PNG，且不保存 `.mmd` 文件。
+- [x] 实际运行链路 PNG 还原 fan-out/fan-in，并区分并行分支、汇聚、循环与未执行路径。
 - [x] State 不存在全局 `max_steps`；检索、Review、安全分别独立计数。
 - [x] `plan_research` 后固定并行调用 Web 与本地检索节点；结构化 mock 在本地节点内部处理。
 - [x] Web 分支通过可选 HITL 和 `web_search_result_ready` 与本地分支汇聚到 `sanitize_and_cluster`。
@@ -511,7 +522,8 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - [x] 必需配置、Schema 和产物路径错误显式暴露，不以伪造结果隐藏。
 - [x] 证据准入过滤失败/登录墙/无匹配占位；语义冲突启发式替代多源即冲突。
 - [x] 报告与 Review 为 LLM 节点；生成消费 `revision_suggestions`；引用以合法 `evidence_id` 为准。
-- [ ] 当前仓库没有 README；后续新增 README 或演示材料时必须与本 SPEC 对齐。
+- [x] README 已说明架构、安装、配置、离线验证、真实 smoke、产物和已知限制，并复用主 Graph 入口。
+- [x] 仓库提供可提交的报告样例与 20 条固定评测输入；当前不预填量化评测结果。
 
 
 
@@ -523,8 +535,8 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `REQ-001` | 3. 主流程 | `src/workflow/graph.py`、`edges.py`、各 `*_nodes.py` | `test_plan_research.py`、`test_web_search_subagent.py`、`test_evidence_sufficiency.py`、`test_graph_input_schema.py` | 部分完成：缺默认离线全链路 invoke 测试 |
 | `REQ-002` | 5. 数据模型 | `src/schemas/state.py`、`src/llm/structured_outputs.py` | `test_state_reducers.py`、`test_graph_input_schema.py`、`test_evidence_quality_scores.py`、`test_evidence_conflict.py` | demo 级完成 |
 | `REQ-003` | 5–6. Prompt 与模型 | `prompts/*.yml`、`src/llm/prompt_loader.py`、`src/config/settings.py` | `test_plan_research.py`、`test_workflow_config.py`、`test_structured_local_search.py`、`test_research_report_nodes.py` | demo 级完成 |
-| `REQ-004` | 7. 数据与存储 | `src/workflow/artifact_nodes.py`、`outputs/` | `test_artifact_nodes.py` | demo 级完成 |
+| `REQ-004` | 7. 数据与存储 | `src/workflow/artifact_nodes.py`、`outputs/` | `test_artifact_nodes.py` | demo 级完成：实际运行图已还原 fan-out/fan-in 与未执行路径 |
 | `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：HITL 为观测占位（非安全闭环），权限无统一注册表；真实 interrupt HITL 后续补齐 |
-| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 已接线；Trace metadata 与 latency/tokens 仍为后续 |
+| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/`、`examples/evaluation_cases.jsonl` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 与 20 条固定评测输入已就绪；Trace metadata、latency/tokens 与量化结果仍为后续 |
 
 
