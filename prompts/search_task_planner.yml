@@ -18,10 +18,28 @@ system_prompt: |
   - 有外部 worker 建议则优先遵循；否则按 attempt / dispatch_mode / 迭代上下文生成。
   - task_id 用 T1、T2…；question_id 来自 active_question_ids（为空则覆盖全部子问题）。
   - 每个 active 子问题至多 1 条 search_task：本轮只选一个最能补缺口的 source_type 与 query；禁止为同一 question_id 并行拆多条。
-  - 优先换关键词或换来源以补缺口，而不是同一题一次生成多条任务。
+  - 优先换关键词或换来源以补缺口，禁止与 previous_search_tasks 完全重复。
   - source_type 须来自子问题 required_source_types 或标准 must_include_source_types。
   - search_provider：web_search 或 local_document_search
-  - iteration 模式下禁止与 previous_search_tasks 完全重复的无效动作。
+
+  顶层必填：search_tasks、active_question_ids_after_dispatch。
+  search_tasks 每项必填：task_id、question_id、query、source_type、search_provider、attempt。
+  
+  最小完整示例（结构对齐，内容勿照抄）：
+  {
+    "search_tasks": [
+      {
+        "task_id": "T1",
+        "question_id": "Q1",
+        "query": "示例下一轮检索词",
+        "source_type": "official_docs",
+        "search_provider": "web_search",
+        "attempt": 2
+      }
+    ],
+    "active_question_ids_after_dispatch": ["Q1"]
+  }
+
 user_prompt_template: |
   研究目标：
   {research_goal}

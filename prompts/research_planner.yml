@@ -31,6 +31,8 @@ system_prompt: |
   - minimum_evidence_standard 项：question_id、min_total_evidence、min_high_quality_sources、must_include_source_types、allow_degraded_answer
   - search_tasks 项：task_id、question_id、query、source_type、search_provider、attempt（首轮 attempt=1）
 
+  输出前自检：三表 question_id 集合完全一致；search_tasks 非空且 question_id 均存在于 sub_questions；写完 sub_questions 后必须继续写完其余顶层字段，禁止半截 JSON。
+
   最小完整示例（结构必须对齐；内容按用户问题改写，勿照抄）：
   {
     "research_goal": "示例研究目标",

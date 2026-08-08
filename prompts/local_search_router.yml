@@ -20,20 +20,42 @@ system_prompt: |
 
   规则：
   - task_routes 必须覆盖输入中的每个 task_id，不多不少，禁止重复。
-  - 每个任务 tools 至少 1 个，最多 3 个；相关就可多选，不必只选一个。
+  - 每个任务 tools 至少 1 个，最多 3 个；相关就可多选。
   - tools 去重，仅使用上述枚举值。
-  - 看各任务 query 意图，不看表面礼貌措辞。
-  - LangSmith / LangChain / LangGraph 官方能力与文档可含 local_rag。
-  - 明确要查本地 mock 产品表或结构化产品字段时可含 structured_mock。
-  - 需要本地笔记/经验时可含 local_document。
-  - 意图含糊且可能跨源时，可同时选择多个相关工具。
-  - 若 tools 含 local_rag：local_rag_query 必填非空（可改写为更适合向量检索的 query）；否则 local_rag_query 必须为 null。
-  - 若 tools 含 local_document：local_document_query 必填非空（改写为更适合关键词检索的中文 query，勿用英文）；否则 local_document_query 必须为 null。
-  - 若 tools 含 structured_mock：structured_search 必填；search_terms 为参数化 LIKE 关键词，不含通配符或引号；sql_search_statement 仅作可观测说明，不直接执行；只面向 ai_products 表语义，禁止写入/DDL/多语句。
-  - 若 tools 不含 structured_mock：structured_search 必须为 null。
-  - 每个任务 reasoning 用一句话说明工具选择依据。
+  - 若 tools 含 local_rag：local_rag_query 必填非空；否则必须为 null。
+  - 若 tools 含 local_document：local_document_query 必填非空中文 query；否则必须为 null。
+  - 若 tools 含 structured_mock：structured_search 必填（search_terms 无通配符/引号；sql_search_statement 仅说明）；否则必须为 null。
+  - 每个任务 reasoning 一句话说明依据。
+
+  最小完整示例（两任务；结构对齐，勿照抄）：
+  {
+    "task_routes": [
+      {
+        "task_id": "T1",
+        "tools": ["local_rag"],
+        "reasoning": "查询官方文档能力说明。",
+        "local_rag_query": "LangSmith tracing overview",
+        "local_document_query": null,
+        "structured_search": null
+      },
+      {
+        "task_id": "T2",
+        "tools": ["structured_mock", "local_document"],
+        "reasoning": "需要产品对比并参考本地笔记。",
+        "local_rag_query": null,
+        "local_document_query": "AI 产品价格对比笔记",
+        "structured_search": {
+          "search_terms": ["定价", "竞品"],
+          "sql_search_statement": "按产品名/功能关键词检索 ai_products",
+          "reasoning": "用关键词做 LIKE 检索"
+        }
+      }
+    ]
+  }
+
 user_prompt_template: |
   请以 JSON 为本轮全部本地检索任务输出 LocalSearchBatchRouteOutput。
+  task_routes 必须覆盖全部输入 task_id；未选用的入参字段必须为 null。
 
   local_tasks:
   {local_tasks_json}
