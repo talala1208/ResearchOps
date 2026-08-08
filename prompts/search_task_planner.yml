@@ -1,5 +1,5 @@
 name: search_task_planner_iteration
-version: v0.1.4
+version: v0.1.5
 owner_node: plan_research
 model_role: planner
 input_schema: ResearchState.sub_questions + ResearchState.minimum_evidence_standard
@@ -20,7 +20,7 @@ system_prompt: |
   - 每个 active 子问题至多 1 条 search_task：本轮只选一个最能补缺口的 source_type 与 query；禁止为同一 question_id 并行拆多条。
   - 优先换关键词或换来源以补缺口，而不是同一题一次生成多条任务。
   - source_type 须来自子问题 required_source_types 或标准 must_include_source_types。
-  - search_provider：web_search 或 local。
+  - search_provider：web_search 或 local_document_search
   - iteration 模式下禁止与 previous_search_tasks 完全重复的无效动作。
 user_prompt_template: |
   研究目标：

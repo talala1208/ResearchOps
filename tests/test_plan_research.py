@@ -153,6 +153,20 @@ class PlanResearchModeTest(unittest.TestCase):
         self.assertEqual(by_id["Q3"].min_total_evidence, 2)
         self.assertEqual(by_id["Q3"].must_include_source_types, ["github"])
 
+    def test_validate_search_tasks_rejects_empty_list(self) -> None:
+        """search_tasks 为空时应失败。"""
+
+        from src.llm.structured_outputs import SearchTaskPlanOutput
+
+        with self.assertRaisesRegex(ValueError, "search_tasks 不能为空"):
+            planning_nodes._validate_search_tasks(
+                {"Q1": {"question_id": "Q1"}},
+                SearchTaskPlanOutput(
+                    search_tasks=[],
+                    active_question_ids_after_dispatch=["Q1"],
+                ),
+            )
+
     def test_coerce_research_plan_unwraps_nested_and_fills_defaults(self) -> None:
         """兼容 research_plan 包装、topic、字段漂移与缺 attempt。"""
 
@@ -303,6 +317,135 @@ class PlanResearchModeTest(unittest.TestCase):
             [{"type": "text", "text": '{"research_goal": "x"}'}]
         )
         self.assertEqual(payload["research_goal"], "x")
+
+    def test_coerce_search_provider_maps_local_aliases(self) -> None:
+        """local / local_* 映射到 local_document_search，其它到 web_search。"""
+
+        self.assertEqual(
+            planning_nodes._coerce_search_provider("local"),
+            "local_document_search",
+        )
+        self.assertEqual(
+            planning_nodes._coerce_search_provider("local_rag"),
+            "local_document_search",
+        )
+        self.assertEqual(
+            planning_nodes._coerce_search_provider("local_document_search"),
+            "local_document_search",
+        )
+        self.assertEqual(
+            planning_nodes._coerce_search_provider("web_search"),
+            "web_search",
+        )
+        self.assertEqual(
+            planning_nodes._coerce_search_provider("serp"),
+            "web_search",
+        )
+        self.assertEqual(
+            planning_nodes._coerce_search_provider(None),
+            "web_search",
+        )
+
+    def test_coerce_search_task_plan_reuses_provider_mapping(self) -> None:
+        """迭代规划 coerce 应复用 search_provider 映射并补 attempt。"""
+
+        coerced = planning_nodes._coerce_search_task_plan_dict(
+            {
+                "search_tasks": [
+                    {
+                        "task_id": "T1",
+                        "question_id": "Q1",
+                        "query": "本地笔记",
+                        "source_type": "local",
+                        "search_provider": "local",
+                    }
+                ]
+            },
+            default_attempt=3,
+        )
+        task = coerced["search_tasks"][0]
+        self.assertEqual(task["search_provider"], "local_document_search")
+        self.assertEqual(task["attempt"], 3)
+        self.assertEqual(coerced["active_question_ids_after_dispatch"], [])
+
+    def test_planner_validation_retry_once_with_error_summary(self) -> None:
+        """校验失败时应把错误摘要追加到 user prompt 并只重试一次。"""
+
+        calls: list[str] = []
+
+        def fake_invoke_json(*, model_role, system_prompt, user_prompt):  # noqa: ANN001
+            calls.append(user_prompt)
+            if len(calls) == 1:
+                return {
+                    "search_tasks": [
+                        {
+                            "task_id": "T1",
+                            "question_id": "Q_MISSING",
+                            "query": "bad",
+                            "source_type": "blog",
+                            "search_provider": "web_search",
+                            "attempt": 2,
+                        }
+                    ],
+                    "active_question_ids_after_dispatch": ["Q1"],
+                }
+            return {
+                "search_tasks": [
+                    {
+                        "task_id": "T1",
+                        "question_id": "Q1",
+                        "query": "retry query",
+                        "source_type": "blog",
+                        "search_provider": "web_search",
+                        "attempt": 2,
+                    }
+                ],
+                "active_question_ids_after_dispatch": ["Q1"],
+            }
+
+        with patch.object(
+            planning_nodes,
+            "_invoke_planner_json",
+            side_effect=fake_invoke_json,
+        ):
+            plan = planning_nodes._invoke_search_task_plan(
+                system_prompt="sys",
+                user_prompt="原始 user prompt",
+                sub_questions={
+                    "Q1": {
+                        "question_id": "Q1",
+                        "question": "能力",
+                        "priority": "high",
+                        "required_source_types": ["blog"],
+                    }
+                },
+                default_attempt=2,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], "原始 user prompt")
+        self.assertIn("上次输出未通过校验", calls[1])
+        self.assertIn("原始 user prompt", calls[1])
+        self.assertEqual(plan.search_tasks[0].query, "retry query")
+
+    def test_planner_validation_retry_raises_second_failure(self) -> None:
+        """第二次仍失败时应抛出第二次错误。"""
+
+        def always_bad(*, model_role, system_prompt, user_prompt):  # noqa: ANN001
+            return {"search_tasks": [{"task_id": "T1"}]}
+
+        with patch.object(
+            planning_nodes,
+            "_invoke_planner_json",
+            side_effect=always_bad,
+        ):
+            with self.assertRaises(Exception):
+                planning_nodes._invoke_search_task_plan(
+                    system_prompt="sys",
+                    user_prompt="user",
+                    sub_questions={"Q1": {"question_id": "Q1"}},
+                    default_attempt=1,
+                )
 
 
 if __name__ == "__main__":

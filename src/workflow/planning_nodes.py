@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 from src.config.settings import get_workflow_config
@@ -17,12 +18,147 @@ from src.workflow.node_utils import increase_search_step
 
 
 T = TypeVar("T")
+PLANNER_RETRY_ERROR_MAX_CHARS = 1500
+SEARCH_PROVIDER_LOCAL = "local_document_search"
+SEARCH_PROVIDER_WEB = "web_search"
 
 
 def _to_json(value: Any) -> str:
     """稳定序列化为 JSON 字符串。"""
 
     return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def _coerce_search_provider(value: Any) -> str:
+    """统一 search_provider：local / local_* → local_document_search，其它 → web_search。"""
+
+    if not isinstance(value, str):
+        return SEARCH_PROVIDER_WEB
+    normalized = value.strip().lower()
+    if normalized == "local" or normalized.startswith("local_"):
+        return SEARCH_PROVIDER_LOCAL
+    if normalized == SEARCH_PROVIDER_WEB:
+        return SEARCH_PROVIDER_WEB
+    return SEARCH_PROVIDER_WEB
+
+
+def _coerce_search_task_items(
+    tasks: Any,
+    *,
+    default_attempt: int = 1,
+) -> list[dict[str, Any]]:
+    """归一 search_tasks：补 attempt，并映射 search_provider。"""
+
+    if not isinstance(tasks, list):
+        return []
+    coerced_tasks: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        attempt = task.get("attempt", default_attempt)
+        if not isinstance(attempt, int) or attempt < 1:
+            attempt = default_attempt
+        coerced_tasks.append(
+            {
+                **task,
+                "attempt": attempt,
+                "search_provider": _coerce_search_provider(task.get("search_provider")),
+            }
+        )
+    return coerced_tasks
+
+
+def _coerce_search_task_plan_dict(
+    payload: dict[str, Any],
+    *,
+    default_attempt: int = 1,
+) -> dict[str, Any]:
+    """将迭代规划 LLM 输出归一到 SearchTaskPlanOutput。"""
+
+    if not isinstance(payload, dict):
+        raise ValueError("检索任务规划 LLM 输出必须是 JSON 对象")
+
+    data = dict(payload)
+    nested = data.pop("search_task_plan", None)
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            if key not in data:
+                data[key] = value
+
+    data["search_tasks"] = _coerce_search_task_items(
+        data.get("search_tasks") or [],
+        default_attempt=default_attempt,
+    )
+    if "active_question_ids_after_dispatch" not in data:
+        data["active_question_ids_after_dispatch"] = []
+    elif not isinstance(data["active_question_ids_after_dispatch"], list):
+        data["active_question_ids_after_dispatch"] = []
+    return data
+
+
+def _format_planner_retry_error(error: BaseException) -> str:
+    """截断校验错误摘要，供重试 Prompt 使用。"""
+
+    summary = str(error).strip() or type(error).__name__
+    if len(summary) > PLANNER_RETRY_ERROR_MAX_CHARS:
+        return summary[:PLANNER_RETRY_ERROR_MAX_CHARS] + "…"
+    return summary
+
+
+def _append_validation_retry_hint(user_prompt: str, error: BaseException) -> str:
+    """把上次校验失败原因追加到 user prompt。"""
+
+    return (
+        f"{user_prompt}\n\n"
+        "上次输出未通过校验，请根据以下错误修正后重新输出合法 JSON 对象，不要解释：\n"
+        f"{_format_planner_retry_error(error)}"
+    )
+
+
+def _invoke_planner_json(
+    *,
+    model_role: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> dict[str, Any]:
+    """调用规划类 LLM，要求返回 JSON 对象。"""
+
+    model = build_chat_model(model_role).bind(
+        response_format={"type": "json_object"}
+    )
+    response = model.invoke(
+        [
+            ("system", system_prompt),
+            ("human", user_prompt),
+        ]
+    )
+    return _parse_message_json_content(getattr(response, "content", response))
+
+
+def _invoke_planner_with_validation_retry(
+    *,
+    model_role: str,
+    system_prompt: str,
+    user_prompt: str,
+    parse_and_validate: Callable[[dict[str, Any]], T],
+) -> T:
+    """规划 LLM 调用：校验失败时带错误摘要重试 1 次。"""
+
+    try:
+        payload = _invoke_planner_json(
+            model_role=model_role,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return parse_and_validate(payload)
+    except Exception as first_error:
+        retry_prompt = _append_validation_retry_hint(user_prompt, first_error)
+        payload = _invoke_planner_json(
+            model_role=model_role,
+            system_prompt=system_prompt,
+            user_prompt=retry_prompt,
+        )
+        return parse_and_validate(payload)
 
 
 def _dedupe_by_question_id(items: list[T]) -> list[T]:
@@ -100,7 +236,7 @@ def _coerce_research_plan_dict(payload: dict[str, Any]) -> dict[str, Any]:
     - sub_questions 缺少 required_source_types
     - expected_evidence / minimum_evidence_standard 字段名漂移或缺省
     - required_authority_level 写成 official/community 等别名
-    - search_tasks 缺少 attempt
+    - search_tasks 缺少 attempt；search_provider 统一映射
     """
 
     if not isinstance(payload, dict):
@@ -194,14 +330,7 @@ def _coerce_research_plan_dict(payload: dict[str, Any]) -> dict[str, Any]:
         )
     data["minimum_evidence_standard"] = coerced_standards
 
-    coerced_tasks: list[dict[str, Any]] = []
-    for task in data.get("search_tasks") or []:
-        if not isinstance(task, dict):
-            continue
-        attempt = task.get("attempt", 1)
-        if not isinstance(attempt, int) or attempt < 1:
-            attempt = 1
-        coerced_tasks.append({**task, "attempt": attempt})
+    coerced_tasks = _coerce_search_task_items(data.get("search_tasks") or [])
     data["search_tasks"] = coerced_tasks
 
     required_source_types = data.get("required_source_types")
@@ -258,25 +387,74 @@ def _parse_message_json_content(content: Any) -> dict[str, Any]:
     return parsed
 
 
+def _build_research_plan_from_payload(
+    payload: dict[str, Any],
+) -> ResearchPlanWithSearchTasksOutput:
+    """coerce → validate → normalize → 计划与任务 ID 校验。"""
+
+    coerced = _coerce_research_plan_dict(payload)
+    plan = ResearchPlanWithSearchTasksOutput.model_validate(coerced)
+    plan = _normalize_research_plan(plan)
+    _validate_research_plan(plan)
+    sub_questions = {item.question_id: item.model_dump() for item in plan.sub_questions}
+    _validate_search_tasks(sub_questions, plan)
+    return plan
+
+
+def _build_search_task_plan_from_payload(
+    payload: dict[str, Any],
+    *,
+    sub_questions: dict[str, Any],
+    default_attempt: int = 1,
+) -> SearchTaskPlanOutput:
+    """coerce → validate → 任务 question_id 校验。"""
+
+    coerced = _coerce_search_task_plan_dict(
+        payload,
+        default_attempt=default_attempt,
+    )
+    task_plan = SearchTaskPlanOutput.model_validate(coerced)
+    _validate_search_tasks(sub_questions, task_plan)
+    return task_plan
+
+
 def _invoke_research_plan(
     *,
     system_prompt: str,
     user_prompt: str,
 ) -> ResearchPlanWithSearchTasksOutput:
-    """调用规划 LLM，先取 JSON 再做确定性归一化，避免 structured parser 提前失败。"""
+    """调用初始规划 LLM；校验失败时带错误摘要重试 1 次。"""
 
-    model = build_chat_model("research_planner").bind(
-        response_format={"type": "json_object"}
+    return _invoke_planner_with_validation_retry(
+        model_role="research_planner",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        parse_and_validate=_build_research_plan_from_payload,
     )
-    response = model.invoke(
-        [
-            ("system", system_prompt),
-            ("human", user_prompt),
-        ]
+
+
+def _invoke_search_task_plan(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    sub_questions: dict[str, Any],
+    default_attempt: int,
+) -> SearchTaskPlanOutput:
+    """调用迭代规划 LLM；复用 coerce，校验失败时带错误摘要重试 1 次。"""
+
+    def _parse(payload: dict[str, Any]) -> SearchTaskPlanOutput:
+        return _build_search_task_plan_from_payload(
+            payload,
+            sub_questions=sub_questions,
+            default_attempt=default_attempt,
+        )
+
+    return _invoke_planner_with_validation_retry(
+        model_role="search_task_planner",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        parse_and_validate=_parse,
     )
-    payload = _parse_message_json_content(getattr(response, "content", response))
-    coerced = _coerce_research_plan_dict(payload)
-    return ResearchPlanWithSearchTasksOutput.model_validate(coerced)
 
 
 def _normalize_research_plan(
@@ -341,7 +519,10 @@ def _validate_search_tasks(
     sub_questions: dict[str, Any],
     task_plan: SearchTaskPlanOutput,
 ) -> None:
-    """校验检索任务引用的 question_id。"""
+    """校验检索任务非空，且引用的 question_id 合法。"""
+
+    if not task_plan.search_tasks:
+        raise ValueError("search_tasks 不能为空")
 
     task_ids = [task.task_id for task in task_plan.search_tasks]
     if len(task_ids) != len(set(task_ids)):
@@ -375,12 +556,8 @@ def _run_initial_planning(state: ResearchState) -> dict[str, Any]:
         system_prompt=prompt["system_prompt"],
         user_prompt=user_prompt,
     )
-    plan = _normalize_research_plan(plan)
-    _validate_research_plan(plan)
 
     sub_questions = {item.question_id: item.model_dump() for item in plan.sub_questions}
-    _validate_search_tasks(sub_questions, plan)
-
     expected_evidence = {
         item.question_id: item.model_dump() for item in plan.expected_evidence
     }
@@ -448,16 +625,12 @@ def _run_iteration_planning(state: ResearchState) -> dict[str, Any]:
         },
     )
 
-    model = build_chat_model("search_task_planner").with_structured_output(
-        SearchTaskPlanOutput
+    task_plan = _invoke_search_task_plan(
+        system_prompt=prompt["system_prompt"],
+        user_prompt=user_prompt,
+        sub_questions=sub_questions,
+        default_attempt=attempt,
     )
-    task_plan = model.invoke(
-        [
-            ("system", prompt["system_prompt"]),
-            ("human", user_prompt),
-        ]
-    )
-    _validate_search_tasks(sub_questions, task_plan)
     search_task_ids_by_question_id = _build_search_task_index(task_plan)
 
     entity_index = {
