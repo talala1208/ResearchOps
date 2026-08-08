@@ -13,13 +13,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from langchain_core.runnables.graph_mermaid import draw_mermaid_png
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.workflow.graph import graph  # noqa: E402
+from src.workflow.artifact_nodes import _draw_mermaid_png_with_one_retry  # noqa: E402
 
 
 PNG_OUTPUT_PATH = PROJECT_ROOT / "outputs" / "runs" / "researchops_graph.png"
@@ -90,7 +89,7 @@ def main() -> None:
 
     PNG_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     mermaid = build_colored_mermaid()
-    png_bytes = draw_mermaid_png(mermaid_syntax=mermaid, background_color="white")
+    png_bytes = _draw_mermaid_png_with_one_retry(mermaid)
     PNG_OUTPUT_PATH.write_bytes(png_bytes)
     print(f"已保存 PNG 图：{PNG_OUTPUT_PATH}")
 

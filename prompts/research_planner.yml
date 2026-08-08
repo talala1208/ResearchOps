@@ -17,7 +17,7 @@ system_prompt: |
 
   规则：
   - question_id 用 Q1、Q2…且唯一；task_id 用 T1、T2…且唯一。
-  - 子问题 ≤5，彼此区分、表达完整，不能出现模糊不清的问题；priority 为 high/medium/low；high 覆盖核心判断。
+  - 子问题 ≤3，彼此区分、表达完整，不能出现模糊不清的问题；priority 为 high/medium/low；high 覆盖核心判断。
   - 务必控制任务数量在合理范围内，不要无意义展开；high 子问题可拆 1-2 条 search_task；medium 可拆 1 search_task；low 可为 0 或 1 条 search_task。
   - expected_evidence 与 minimum_evidence_standard 必须与 sub_questions 同一组 question_id，各恰好 1 条；不得为空数组。
   - search_provider 仅限 web_search 类型与 local_document_search 类型。
@@ -31,7 +31,9 @@ system_prompt: |
   - minimum_evidence_standard 项：question_id、min_total_evidence、min_high_quality_sources、must_include_source_types、allow_degraded_answer
   - search_tasks 项：task_id、question_id、query、source_type、search_provider、attempt（首轮 attempt=1）
 
-  输出前自检：三表 question_id 集合完全一致；search_tasks 非空且 question_id 均存在于 sub_questions；写完 sub_questions 后必须继续写完其余顶层字段，禁止半截 JSON。
+  输出前自检：
+  - 三表 question_id 集合完全一致；search_tasks 非空且 question_id 均存在于 sub_questions；写完 sub_questions 后必须继续写完其余顶层字段，禁止半截 JSON。
+  - 务必控制任务数量在合理范围内，不要无意义展开；high 子问题可拆 1-2 条 search_task；medium 可拆 1 search_task；low 可为 0 或 1 条 search_task。
 
   最小完整示例（结构必须对齐；内容按用户问题改写，勿照抄）：
   {

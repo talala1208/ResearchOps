@@ -73,6 +73,8 @@ class WebToolEvaluationRecord(TypedDict):
     ok: bool
     valid_result_count: int
     content_length: int
+    body_appended: bool
+    body_chars: int
     failure_type: str | None
     error: str | None
 

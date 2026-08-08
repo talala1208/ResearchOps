@@ -364,9 +364,90 @@ def _extract_anchored_numbers(text: str) -> list[tuple[str, float]]:
     return anchored
 
 
+_CONFLICT_METRIC_TERMS = (
+    "价格",
+    "票价",
+    "费用",
+    "开放时间",
+    "闭馆时间",
+    "时长",
+    "数量",
+    "面积",
+    "增长率",
+    "评分",
+    "温度",
+    "距离",
+    "容量",
+    "限额",
+    "price",
+    "cost",
+    "rating",
+    "duration",
+    "distance",
+    "capacity",
+)
+_GENERIC_ENTITY_MARKERS = {
+    "博物馆",
+    "美术馆",
+    "艺术馆",
+    "展览馆",
+    "产品",
+    "服务",
+    "项目",
+    "页面",
+    "文档",
+    "museum",
+    "product",
+    "service",
+}
+_TIME_SCOPE_PATTERN = re.compile(
+    r"20\d{2}(?:[-年/.]\d{1,2}(?:[-月/.]\d{1,2}日?)?)?"
+    r"|周[一二三四五六日天]|周末|工作日|节假日|平日|当前|截至"
+    r"|weekday|weekend|holiday",
+    re.IGNORECASE,
+)
+
+
+def _entity_markers(text: str) -> set[str]:
+    """提取保守的实体标记，排除指标词和通用类别词。"""
+
+    cleaned = _TIME_SCOPE_PATTERN.sub(" ", text.lower())
+    cleaned = re.sub(r"-?\d+(?:\.\d+)?%?", " ", cleaned)
+    for term in _CONFLICT_METRIC_TERMS:
+        cleaned = cleaned.replace(term, " ")
+
+    markers = {
+        token
+        for token in re.findall(r"[a-z][a-z0-9_.-]{2,}", cleaned)
+        if token not in _GENERIC_ENTITY_MARKERS
+    }
+    for sequence in re.findall(r"[\u4e00-\u9fff]{3,}", cleaned):
+        max_size = min(6, len(sequence))
+        for size in range(3, max_size + 1):
+            markers.update(
+                sequence[index : index + size]
+                for index in range(len(sequence) - size + 1)
+            )
+    return markers - _GENERIC_ENTITY_MARKERS
+
+
+def _same_numeric_context(text_a: str, text_b: str) -> bool:
+    """数值冲突必须共享实体，且显式时间范围不能互相错位。"""
+
+    if not (_entity_markers(text_a) & _entity_markers(text_b)):
+        return False
+    times_a = {match.group(0).lower() for match in _TIME_SCOPE_PATTERN.finditer(text_a)}
+    times_b = {match.group(0).lower() for match in _TIME_SCOPE_PATTERN.finditer(text_b)}
+    if times_a or times_b:
+        return bool(times_a & times_b)
+    return True
+
+
 def _has_numeric_conflict(text_a: str, text_b: str) -> bool:
     """同锚点数值相对差异过大则视为冲突。"""
 
+    if not _same_numeric_context(text_a, text_b):
+        return False
     numbers_a = _extract_anchored_numbers(text_a)
     numbers_b = _extract_anchored_numbers(text_b)
     if not numbers_a or not numbers_b:

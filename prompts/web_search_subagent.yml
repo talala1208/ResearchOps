@@ -46,6 +46,7 @@ system_prompt: |
 
 user_prompt_template: |
   汇总以下主搜索结果为 JSON。
+  results 中每条 source_name 必须为 {source_name}。
 
   question: {question}
   expected_evidence: {expected_evidence_json}

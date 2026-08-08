@@ -88,10 +88,28 @@ class EvidenceAdmissionConflictTest(unittest.TestCase):
             _has_polarity_conflict("该功能支持 SSO", "文档提到 SSO 集成")
         )
         self.assertTrue(
-            _has_numeric_conflict("价格: 100 元", "价格: 200 元")
+            _has_numeric_conflict(
+                "星云博物馆价格: 100 元",
+                "星云博物馆价格: 200 元",
+            )
         )
         self.assertFalse(
-            _has_numeric_conflict("价格: 100 元", "价格: 105 元")
+            _has_numeric_conflict(
+                "星云博物馆价格: 100 元",
+                "星云博物馆价格: 105 元",
+            )
+        )
+        self.assertFalse(
+            _has_numeric_conflict(
+                "星云博物馆价格: 100 元",
+                "海港科技馆价格: 200 元",
+            )
+        )
+        self.assertFalse(
+            _has_numeric_conflict(
+                "星云博物馆 2025年价格: 100 元",
+                "星云博物馆 2026年价格: 200 元",
+            )
         )
 
     def test_evaluate_builds_conflict_only_on_semantic_signal(self) -> None:

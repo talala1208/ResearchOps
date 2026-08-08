@@ -657,11 +657,11 @@ def _enrich_result_with_page_body(
 ) -> dict[str, Any]:
     """把 Playwright 截断正文写入对应 SerpAPI 候选的 body，保留原 snippet。"""
 
-    compact = _compact_playwright_output(
-        page_output.get("output"),
-        url=fetch_url,
+    browser_snapshot_output = _browser_snapshot_output(page_output.get("output"))
+    materialized = _materialize_query_url_playwright_body(
+        browser_snapshot_output=browser_snapshot_output,
     )
-    body = str(compact.get("content") or "").strip()
+    body = str(materialized.get("body") or "").strip()
     if not body:
         return result
 
@@ -995,6 +995,8 @@ def _maybe_fetch_serpapi_page_and_enrich(
         playwright_mcp_fetch_page,
         {"url": fetch_url},
     )
+    page_output["body_appended"] = False
+    page_output["body_chars"] = 0
     updated_outputs = [*tool_outputs, page_output]
     login_reason = _playwright_login_signal(page_output)
     if login_reason is not None:
@@ -1051,6 +1053,8 @@ def _maybe_fetch_serpapi_page_and_enrich(
             {"error": None, "output": {"content": body}}
         )
         break
+    page_output["body_appended"] = body_appended
+    page_output["body_chars"] = body_chars
     if body_login is not None:
         enriched = _mark_result_requires_login(
             enriched,
@@ -1370,7 +1374,37 @@ def _materialize_context7_results_from_tool_outputs(
     return candidates
 
 
+def _browser_snapshot_output(playwright_output: Any) -> Any:
+    """从 Playwright 工具结果中提取 browser_snapshot 的原始 output。"""
+
+    output_dict = _tool_output_as_dict(playwright_output)
+    snapshot_output = output_dict.get("snapshot_result")
+    if snapshot_output is not None:
+        return snapshot_output
+    raw_result = _coerce_structured_value(output_dict.get("raw_result"))
+    if isinstance(raw_result, dict):
+        return raw_result.get("snapshot_result")
+    return None
+
+
 @traceable(name="materialize_query_url_playwright_body", run_type="chain")
+def _materialize_query_url_playwright_body(
+    *,
+    browser_snapshot_output: Any,
+) -> dict[str, Any]:
+    """清洗 browser_snapshot output，并显式返回实际写入候选的正文。"""
+
+    snapshot_text = unwrap_text_content(browser_snapshot_output).strip()
+    if not snapshot_text:
+        snapshot_text = _tool_output_text(browser_snapshot_output).strip()
+    body = clean_playwright_body(snapshot_text, max_chars=_playwright_max_chars())
+    return {
+        "body_appended": bool(body),
+        "body_chars": len(body),
+        "body": body,
+    }
+
+
 def _materialize_query_url_playwright_results(
     tool_outputs: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -1381,6 +1415,8 @@ def _materialize_query_url_playwright_results(
     for tool_output in tool_outputs:
         if tool_output.get("tool_name") != "playwright_mcp_fetch_page":
             continue
+        tool_output["body_appended"] = False
+        tool_output["body_chars"] = 0
         input_payload = tool_output.get("input")
         url = None
         if isinstance(input_payload, dict):
@@ -1412,8 +1448,12 @@ def _materialize_query_url_playwright_results(
                 continue
         if not tool_output.get("ok"):
             continue
-        compact = _compact_playwright_output(tool_output.get("output"), url=url)
-        body = str(compact.get("content") or "").strip()
+        playwright_output = tool_output.get("output")
+        compact = _compact_playwright_output(playwright_output, url=url)
+        materialized = _materialize_query_url_playwright_body(
+            browser_snapshot_output=_browser_snapshot_output(playwright_output),
+        )
+        body = str(materialized.get("body") or "").strip()
         page_url = compact.get("url") or url
         if not isinstance(page_url, str) or not page_url.startswith(("http://", "https://")):
             continue
@@ -1440,6 +1480,8 @@ def _materialize_query_url_playwright_results(
                     "score_reason": body_login,
                 }
             )
+            tool_output["body_appended"] = bool(body)
+            tool_output["body_chars"] = len(body)
             continue
         if not body:
             continue
@@ -1472,6 +1514,8 @@ def _materialize_query_url_playwright_results(
                 "body": body,
             }
         )
+        tool_output["body_appended"] = True
+        tool_output["body_chars"] = len(body)
     return {
         "candidates": candidates,
         "body_writes": body_writes,
@@ -1870,12 +1914,16 @@ def _build_web_tool_evaluation_records(
             else _valid_search_result_count(tool_output)
         )
         error = tool_output.get("error")
+        body_appended = bool(tool_output.get("body_appended")) if is_playwright else False
+        body_chars = int(tool_output.get("body_chars") or 0) if is_playwright else 0
         records.append(
             {
                 "tool_name": tool_name,
                 "ok": bool(tool_output.get("ok")),
                 "valid_result_count": valid_result_count,
                 "content_length": content_length,
+                "body_appended": body_appended,
+                "body_chars": body_chars,
                 "failure_type": failure_type,
                 "error": str(error)[:500] if error else None,
             }

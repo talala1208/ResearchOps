@@ -79,6 +79,43 @@ class PersistOutputsSmokeTest(unittest.TestCase):
             self.assertNotIn("executed_mermaid", result)
             self.assertNotIn("executed_mermaid_png_path", result)
 
+    def test_mermaid_api_failure_retries_once(self) -> None:
+        """mermaid.ink 首次失败时应重试一次并返回第二次结果。"""
+
+        with patch.object(
+            artifact_nodes,
+            "draw_mermaid_png",
+            side_effect=[ValueError("Status code: 404"), b"png-after-retry"],
+        ) as draw:
+            result = artifact_nodes._draw_mermaid_png_with_one_retry("graph TD")
+
+        self.assertEqual(result, b"png-after-retry")
+        self.assertEqual(draw.call_count, 2)
+        for call in draw.call_args_list:
+            self.assertEqual(call.kwargs["max_retries"], 0)
+
+    def test_mermaid_api_second_failure_is_exposed(self) -> None:
+        """mermaid.ink 连续失败时应在一次重试后显式抛错。"""
+
+        with patch.object(
+            artifact_nodes,
+            "draw_mermaid_png",
+            side_effect=ValueError("mermaid.ink unavailable"),
+        ) as draw:
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                artifact_nodes._draw_mermaid_png_with_one_retry("graph TD")
+
+        self.assertEqual(draw.call_count, 2)
+
+    def test_run_id_is_unique_and_contains_microseconds(self) -> None:
+        """连续运行应生成不同且包含微秒与随机后缀的 ID。"""
+
+        first = artifact_nodes._build_run_id()
+        second = artifact_nodes._build_run_id()
+
+        self.assertNotEqual(first, second)
+        self.assertRegex(first, r"^\d{8}T\d{12}Z_[0-9a-f]{8}$")
+
 
 class ExecutedMermaidTopologyTest(unittest.TestCase):
     """验证实际运行图还原 fan-out / fan-in / 循环与未执行路径。"""

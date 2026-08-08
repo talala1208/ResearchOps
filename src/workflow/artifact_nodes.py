@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.runnables.graph_mermaid import draw_mermaid_png
 
@@ -348,15 +349,32 @@ def _write_executed_graph_png(
 
     mermaid = _build_executed_mermaid(executed_nodes)
     png_path = runs_dir / f"{run_id}_executed.png"
-    png_bytes = draw_mermaid_png(mermaid_syntax=mermaid, background_color="white")
+    png_bytes = _draw_mermaid_png_with_one_retry(mermaid)
     png_path.write_bytes(png_bytes)
     return str(png_path)
+
+
+def _draw_mermaid_png_with_one_retry(mermaid: str) -> bytes:
+    """mermaid.ink 调用失败时统一重试一次。"""
+
+    for attempt in range(2):
+        try:
+            return draw_mermaid_png(
+                mermaid_syntax=mermaid,
+                background_color="white",
+                max_retries=0,
+            )
+        except ValueError:
+            if attempt == 1:
+                raise
+    raise RuntimeError("Mermaid PNG 重试流程异常结束")
 
 
 def _build_run_id() -> str:
     """生成本地运行 ID。"""
 
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"{timestamp}_{uuid4().hex[:8]}"
 
 
 def _source_contribution(state: ResearchState) -> dict[str, int]:

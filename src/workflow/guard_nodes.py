@@ -13,12 +13,33 @@ from src.workflow.node_utils import record_node
 from src.workflow.report_nodes import append_cited_evidence_appendix
 
 
-SENSITIVE_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
-    re.compile(r"(?i)api[_-]?key\s*[:=]\s*[^\s]+"),
-    re.compile(r"(?i)authorization\s*[:=]\s*bearer\s+[^\s]+"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-]
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?P<value>sk-[A-Za-z0-9_-]{12,})"),
+    re.compile(r"(?i)api[_-]?key\s*[:=]\s*(?P<value>[^\s,;]+)"),
+    re.compile(r"(?i)authorization\s*[:=]\s*bearer\s+(?P<value>[^\s,;]+)"),
+)
+PRIVATE_KEY_BLOCK_PATTERN = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----\s+"
+    r"(?P<body>[A-Za-z0-9+/=\s]{32,}?)\s+"
+    r"-----END [A-Z ]*PRIVATE KEY-----",
+    re.MULTILINE,
+)
+PLACEHOLDER_MARKERS = (
+    "your_api_key",
+    "your-api-key",
+    "your_token",
+    "your-token",
+    "api_key_here",
+    "token_here",
+    "example_key",
+    "example_token",
+    "test_key",
+    "test_token",
+    "demo_key",
+    "demo_token",
+    "placeholder",
+    "redacted",
+)
 INJECTION_PATTERNS = [
     "ignore previous instructions",
     "忽略之前的指令",
@@ -26,6 +47,38 @@ INJECTION_PATTERNS = [
     "输出系统 prompt",
     "读取 .env",
 ]
+
+
+def _looks_like_secret_placeholder(value: str) -> bool:
+    """判断密钥候选是否为文档示例中的明确占位符。"""
+
+    cleaned = value.strip("`'\"()[]{}.,:").strip()
+    lowered = cleaned.lower()
+    if not lowered:
+        return True
+    if value.strip().startswith("<") and value.strip().endswith(">"):
+        return True
+    if value.strip().startswith("${") and value.strip().endswith("}"):
+        return True
+    if any(marker in lowered for marker in PLACEHOLDER_MARKERS):
+        return True
+    return re.fullmatch(r"[xX*._-]+", cleaned) is not None
+
+
+def _contains_sensitive_secret(report: str) -> bool:
+    """检测具有真实凭据形态的密钥，忽略明确示例占位符。"""
+
+    if PRIVATE_KEY_BLOCK_PATTERN.search(report):
+        return True
+    for pattern in SECRET_VALUE_PATTERNS:
+        for match in pattern.finditer(report):
+            value = match.group("value")
+            if _looks_like_secret_placeholder(value):
+                continue
+            cleaned = value.strip("`'\"()[]{}.,:")
+            if len(cleaned) >= 12:
+                return True
+    return False
 
 
 def input_guard(state: ResearchState) -> dict[str, Any]:
@@ -61,10 +114,8 @@ def safety_review(state: ResearchState) -> dict[str, Any]:
     report = state["report_draft"]
     detected_risks = []
 
-    for pattern in SENSITIVE_PATTERNS:
-        if pattern.search(report):
-            detected_risks.append("sensitive_secret_pattern")
-            break
+    if _contains_sensitive_secret(report):
+        detected_risks.append("sensitive_secret_pattern")
 
     lowered_report = report.lower()
     for pattern in INJECTION_PATTERNS:
@@ -84,15 +135,35 @@ def safety_review(state: ResearchState) -> dict[str, Any]:
     downgrade_required = not safety_pass
     downgrade_reason = "安全审查未通过，需要降级输出。" if downgrade_required else None
     final_report = report
+    safety_state_updates: dict[str, Any] = {}
     if downgrade_required:
         final_report = (
-            report
-            + "\n\n## 安全审查说明\n\n"
-            + downgrade_reason
-            + "检测到风险："
+            "# 安全降级报告\n\n"
+            "原报告未通过安全审查，危险正文已被移除，未写入最终产物。\n\n"
+            "## 安全审查说明\n\n"
+            f"{downgrade_reason}\n\n"
+            "检测到风险："
             + "、".join(detected_risks)
+            + "\n"
         )
-    final_report = append_cited_evidence_appendix(final_report, state)
+        evidence_items = state.get("evidence_items", {})
+        safety_state_updates = {
+            "degraded": True,
+            "degradation_reason": downgrade_reason,
+            "entity_index": {
+                **state.get("entity_index", {}),
+                "used_evidence_ids": [],
+            },
+            "evidence_items": {
+                evidence_id: {
+                    **evidence,
+                    "used_in_final_report": False,
+                }
+                for evidence_id, evidence in evidence_items.items()
+            },
+        }
+    else:
+        final_report = append_cited_evidence_appendix(final_report, state)
 
     return {
         **record_node(state, "safety_review"),
@@ -103,6 +174,7 @@ def safety_review(state: ResearchState) -> dict[str, Any]:
             "downgrade_required": downgrade_required,
             "downgrade_reason": downgrade_reason,
         },
+        **safety_state_updates,
         "final_report": final_report,
         "report_draft": "",
     }

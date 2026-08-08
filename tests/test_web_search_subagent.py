@@ -682,6 +682,23 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(len(playwright["body_writes"]), 1)
         self.assertTrue(playwright["body_writes"][0]["body_appended"])
         self.assertIn("Playwright 页面正文", playwright["body_writes"][0]["body"])
+        self.assertTrue(tool_outputs[2]["body_appended"])
+        self.assertGreater(tool_outputs[2]["body_chars"], 0)
+
+        snapshot_materialized = (
+            web_search_subagent._materialize_query_url_playwright_body(
+                browser_snapshot_output={
+                    "type": "text",
+                    "text": "导航栏\n完整 Playwright 页面正文，应被清洗后写入。",
+                }
+            )
+        )
+        self.assertTrue(snapshot_materialized["body_appended"])
+        self.assertEqual(
+            snapshot_materialized["body_chars"],
+            len(snapshot_materialized["body"]),
+        )
+        self.assertIn("Playwright 页面正文", snapshot_materialized["body"])
 
         merged = web_search_subagent._merge_all_web_tool_results_by_code(
             tool_outputs,
@@ -968,6 +985,15 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(updated_result["page_fetch"]["attempted"], True)
         self.assertEqual(updated_result["page_fetch"]["body_appended"], True)
         self.assertGreater(updated_result["page_fetch"]["body_chars"], 0)
+        records = web_search_subagent._build_web_tool_evaluation_records(
+            updated_outputs
+        )
+        playwright_record = records[-1]
+        self.assertTrue(playwright_record["body_appended"])
+        self.assertEqual(
+            playwright_record["body_chars"],
+            len(serp_item["body"]),
+        )
 
     def test_enrich_body_matches_normalized_url_or_path(self) -> None:
         """仅有 url_or_path 且尾斜杠不同时，仍应写入 body。"""
@@ -987,7 +1013,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
             fetch_url="https://example.com/high",
             page_output={
                 "ok": True,
-                "output": {"title": "Page", "content": "正文内容"},
+                "output": {"title": "Page", "snapshot_result": "正文内容"},
             },
         )
         self.assertEqual(enriched["results"][0]["body"], "正文内容")

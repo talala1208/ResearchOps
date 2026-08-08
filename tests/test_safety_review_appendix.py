@@ -66,6 +66,58 @@ class SafetyReviewAppendixTest(unittest.TestCase):
         self.assertIn("- [E2] `a.md` — 本地标题", final_report)
         self.assertEqual(result["report_draft"], "")
 
+    def test_safety_review_allows_documentation_placeholders(self) -> None:
+        """文档中的明确密钥占位符不应触发安全降级。"""
+
+        state = {
+            "report_draft": (
+                "配置示例：\n"
+                "api_key=YOUR_API_KEY\n"
+                "Authorization: Bearer <token>\n"
+                "API_KEY=${API_KEY}\n"
+                "api-key=xxxxxxxxxxxxxxxx\n"
+            ),
+            "executed_nodes": [],
+            "entity_index": {"used_evidence_ids": []},
+            "evidence_items": {},
+        }
+
+        result = safety_review(state)
+
+        self.assertTrue(result["safety_review_result"]["safety_pass"])
+        self.assertEqual(result["safety_review_result"]["safety_risk_level"], "low")
+        self.assertEqual(result["safety_review_result"]["detected_risks"], [])
+        self.assertFalse(result["safety_review_result"]["downgrade_required"])
+
+    def test_safety_review_rejects_credential_shaped_values(self) -> None:
+        """具有真实凭据长度和形态的值仍应触发安全降级。"""
+
+        state = {
+            "report_draft": (
+                "api_key=q1W2e3R4t5Y6u7I8o9P0\n"
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature\n"
+            ),
+            "executed_nodes": [],
+            "entity_index": {"used_evidence_ids": []},
+            "evidence_items": {},
+        }
+
+        result = safety_review(state)
+
+        self.assertFalse(result["safety_review_result"]["safety_pass"])
+        self.assertEqual(result["safety_review_result"]["safety_risk_level"], "high")
+        self.assertEqual(
+            result["safety_review_result"]["detected_risks"],
+            ["sensitive_secret_pattern"],
+        )
+        self.assertTrue(result["safety_review_result"]["downgrade_required"])
+        self.assertNotIn("q1W2e3R4t5Y6u7I8o9P0", result["final_report"])
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result["final_report"])
+        self.assertIn("危险正文已被移除", result["final_report"])
+        self.assertNotIn("## 引用证据", result["final_report"])
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["entity_index"]["used_evidence_ids"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
