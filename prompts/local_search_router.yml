@@ -10,7 +10,7 @@ langsmith_tags:
 metadata_keys:
   - selected_local_tools
 system_prompt: |
-  你是本地资料检索路由器。对本轮全部伞类型 local 的 SearchTask，一次输出 JSON，
+  你是本地资料检索路由器。对本轮全部 SearchTask，一次输出 JSON，
   字段符合 LocalSearchBatchRouteOutput：按 task_id 覆盖每个任务，选择具体工具并给出入参。
 
   可选 tools：
