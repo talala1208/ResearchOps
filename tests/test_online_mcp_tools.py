@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -86,6 +87,18 @@ class PlaywrightMCPSessionTest(unittest.IsolatedAsyncioTestCase):
             online_mcp_tools,
             "_load_mcp_session_tools",
             return_value=tools,
+        ), patch.object(
+            online_mcp_tools.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("93.184.216.34", 443),
+                )
+            ],
         ):
             result = await online_mcp_tools._playwright_fetch_page_async(
                 "https://example.com"
@@ -98,6 +111,88 @@ class PlaywrightMCPSessionTest(unittest.IsolatedAsyncioTestCase):
             ["browser_navigate", "browser_snapshot"],
         )
         self.assertIn("https://example.com", result["snapshot_result"])
+
+    async def test_private_navigation_target_is_rejected(self) -> None:
+        """导航前应拒绝解析到私网的目标。"""
+
+        with patch.object(
+            online_mcp_tools.socket,
+            "getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+            ],
+        ):
+            with self.assertRaisesRegex(
+                online_mcp_tools.MCPToolError,
+                "非公网地址",
+            ):
+                await online_mcp_tools._playwright_fetch_page_async(
+                    "https://internal.example"
+                )
+
+    async def test_private_redirect_target_is_rejected(self) -> None:
+        """导航结果暴露私网重定向地址时应在读取快照前拒绝。"""
+
+        state = {"snapshot_called": False}
+
+        class FakeSessionContext:
+            async def __aenter__(self) -> object:
+                return object()
+
+            async def __aexit__(self, exc_type, exc, traceback) -> None:
+                return None
+
+        class FakeClient:
+            def session(self, server_name: str) -> FakeSessionContext:
+                return FakeSessionContext()
+
+        class FakeTool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def ainvoke(self, payload: dict) -> str:
+                if self.name == "browser_navigate":
+                    return "已跳转到 http://127.0.0.1/admin"
+                state["snapshot_called"] = True
+                return "snapshot"
+
+        def fake_getaddrinfo(host: str, port: int, **kwargs):
+            address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+        with patch.object(
+            online_mcp_tools,
+            "_build_mcp_client",
+            return_value=FakeClient(),
+        ), patch.object(
+            online_mcp_tools,
+            "_load_mcp_session_tools",
+            return_value=[FakeTool("browser_navigate"), FakeTool("browser_snapshot")],
+        ), patch.object(
+            online_mcp_tools.socket,
+            "getaddrinfo",
+            side_effect=fake_getaddrinfo,
+        ):
+            with self.assertRaisesRegex(
+                online_mcp_tools.MCPToolError,
+                "非公网地址",
+            ):
+                await online_mcp_tools._playwright_fetch_page_async(
+                    "https://example.com"
+                )
+
+        self.assertFalse(state["snapshot_called"])
+
+    def test_non_standard_port_is_rejected(self) -> None:
+        """HTTP(S) 导航不允许使用非标准端口。"""
+
+        with self.assertRaisesRegex(
+            online_mcp_tools.MCPToolError,
+            "非预期端口",
+        ):
+            online_mcp_tools._validate_public_http_url(
+                "https://example.com:8443"
+            )
 
 
 if __name__ == "__main__":

@@ -677,8 +677,11 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         self.assertEqual(tavily[0]["url"], "https://tavily.example/nested")
         self.assertEqual(len(context7), 1)
         self.assertEqual(context7[0]["docs_result"], "official nested docs")
-        self.assertEqual(len(playwright), 1)
-        self.assertIn("Playwright 页面正文", playwright[0]["body"])
+        self.assertEqual(len(playwright["candidates"]), 1)
+        self.assertIn("Playwright 页面正文", playwright["candidates"][0]["body"])
+        self.assertEqual(len(playwright["body_writes"]), 1)
+        self.assertTrue(playwright["body_writes"][0]["body_appended"])
+        self.assertIn("Playwright 页面正文", playwright["body_writes"][0]["body"])
 
         merged = web_search_subagent._merge_all_web_tool_results_by_code(
             tool_outputs,
@@ -959,7 +962,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
         summarize.assert_not_called()
         self.assertEqual(len(updated_outputs), 2)
         serp_item = updated_result["results"][0]
-        self.assertEqual(serp_item["title"], "Page Title")
+        self.assertEqual(serp_item["title"], "Serp High")
         self.assertEqual(serp_item["snippet"], "original snippet")
         self.assertEqual(serp_item["body"], "完整页面正文内容")
         self.assertEqual(updated_result["page_fetch"]["attempted"], True)
@@ -1367,7 +1370,7 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             patch.object(
                 web_search_subagent,
                 "_materialize_query_url_playwright_results",
-                return_value=[],
+                return_value={"candidates": [], "body_writes": []},
             ),
         ):
             raw = web_search_subagent.web_search_subagent_tool.invoke(

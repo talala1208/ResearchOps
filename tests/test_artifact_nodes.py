@@ -68,10 +68,16 @@ class PersistOutputsSmokeTest(unittest.TestCase):
             )
 
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            self.assertEqual(metrics["executed_mermaid_png_path"], str(png_path))
+            self.assertNotIn("total_steps", metrics)
+            self.assertNotIn("executed_mermaid_png_path", metrics)
             self.assertNotIn("executed_mermaid_path", metrics)
             self.assertEqual(metrics["discarded_candidate_count"], 0)
             self.assertEqual(metrics["final_citation_count"], 0)
+            self.assertNotIn("total_latency_ms", metrics)
+            self.assertNotIn("total_tokens", metrics)
+            self.assertNotIn("final_report_path", result)
+            self.assertNotIn("executed_mermaid", result)
+            self.assertNotIn("executed_mermaid_png_path", result)
 
 
 class ExecutedMermaidTopologyTest(unittest.TestCase):

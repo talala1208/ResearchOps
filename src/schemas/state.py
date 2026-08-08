@@ -190,15 +190,12 @@ class SafetyReviewResult(TypedDict):
 class EvaluationMetrics(TypedDict):
     """最终运行指标。"""
 
-    total_steps: int
     search_steps: int
     max_search_steps: int
     review_revision_count: int
     max_review_revisions: int
     safety_revision_count: int
     max_safety_revisions: int
-    total_latency_ms: int
-    total_tokens: int
     evidence_count: int
     final_citation_count: int
     conflict_count: int
@@ -235,7 +232,6 @@ class ResearchState(TypedDict, total=False):
     input_guard_result: SafetyReviewResult
     research_goal: str
     sub_questions: dict[str, SubQuestion]  # key: question_id
-    required_source_types: list[SourceType]
     expected_evidence: dict[str, ExpectedEvidence]  # key: question_id
     minimum_evidence_standard: dict[str, MinimumEvidenceStandard]  # key: question_id
     entity_index: StateEntityIndex
@@ -244,8 +240,6 @@ class ResearchState(TypedDict, total=False):
     active_question_ids: list[str]
     search_tasks: list[SearchTask]
     planning_mode: Literal["initial", "iteration"]
-    search_dispatch_mode: Literal["initial", "iteration"]
-    search_attempt: int
     search_iteration_context: dict
 
     # 工具输出与紧凑观测记录
@@ -275,7 +269,6 @@ class ResearchState(TypedDict, total=False):
     search_steps: int
     max_search_steps: int
     step_budget_exhausted: bool
-    search_budget_remaining: int
     step_budget_reason: str | None
     iteration_count: int
     repeated_action_count: dict[str, int]
@@ -295,9 +288,6 @@ class ResearchState(TypedDict, total=False):
     degraded: bool
     degradation_reason: str | None
     final_report: str
-    final_report_path: str | None
-    executed_mermaid: str | None
-    executed_mermaid_png_path: str | None
     output_artifacts: dict[str, str]
 
     # 观测与指标

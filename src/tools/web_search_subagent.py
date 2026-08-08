@@ -665,7 +665,6 @@ def _enrich_result_with_page_body(
     if not body:
         return result
 
-    page_title = compact.get("title")
     target_url = _normalize_candidate_url(fetch_url)
     updated_results: list[Any] = []
     appended = False
@@ -680,8 +679,6 @@ def _enrich_result_with_page_body(
             updated_results.append(item)
             continue
         enriched = dict(item)
-        if isinstance(page_title, str) and page_title.strip():
-            enriched["title"] = page_title.strip()
         enriched["body"] = body
         updated_results.append(enriched)
         appended = True
@@ -1376,10 +1373,11 @@ def _materialize_context7_results_from_tool_outputs(
 @traceable(name="materialize_query_url_playwright_body", run_type="chain")
 def _materialize_query_url_playwright_results(
     tool_outputs: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """query 含 URL 时的 Playwright 抓取结果，由代码物化为带 body 的候选。"""
+) -> dict[str, list[dict[str, Any]]]:
+    """物化 query URL，并在 trace output 显式记录实际写入的清洗正文。"""
 
     candidates: list[dict[str, Any]] = []
+    body_writes: list[dict[str, Any]] = []
     for tool_output in tool_outputs:
         if tool_output.get("tool_name") != "playwright_mcp_fetch_page":
             continue
@@ -1466,7 +1464,18 @@ def _materialize_query_url_playwright_results(
                 "scored_by": "playwright_code",
             }
         )
-    return candidates
+        body_writes.append(
+            {
+                "url": page_url,
+                "body_appended": True,
+                "body_chars": len(body),
+                "body": body,
+            }
+        )
+    return {
+        "candidates": candidates,
+        "body_writes": body_writes,
+    }
 
 
 def _candidate_richness_key(item: dict[str, Any]) -> tuple[Any, ...]:
@@ -1567,7 +1576,8 @@ def _merge_all_web_tool_results_by_code(
 
     tavily_candidates = _materialize_tavily_results_from_tool_outputs(tool_outputs)
     context7_candidates = _materialize_context7_results_from_tool_outputs(tool_outputs)
-    playwright_candidates = _materialize_query_url_playwright_results(tool_outputs)
+    playwright_materialization = _materialize_query_url_playwright_results(tool_outputs)
+    playwright_candidates = playwright_materialization["candidates"]
     merged = _merge_code_materialized_candidates(
         serp_result,
         tavily_candidates=tavily_candidates,

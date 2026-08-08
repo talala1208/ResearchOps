@@ -97,8 +97,6 @@ def _final_report_length(output: dict[str, Any]) -> int:
 def _persist_success(output: dict[str, Any]) -> bool:
     """判断运行产物是否保存成功。"""
 
-    if output.get("final_report_path") or output.get("executed_mermaid_png_path"):
-        return True
     artifacts = output.get("output_artifacts")
     if isinstance(artifacts, dict) and artifacts:
         return True

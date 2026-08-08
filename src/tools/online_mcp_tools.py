@@ -17,11 +17,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import socket
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain.tools import tool
 
@@ -37,6 +40,54 @@ CONTEXT7_LIBRARY_ID_PATTERN = re.compile(
 
 class MCPToolError(RuntimeError):
     """MCP 工具调用错误。"""
+
+
+def _validate_public_http_url(url: str) -> None:
+    """校验导航目标仅使用标准端口访问公网 HTTP(S) 地址。"""
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise MCPToolError(f"导航目标必须是公网 HTTP(S) URL：{url}")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise MCPToolError(f"导航目标端口非法：{url}") from exc
+    expected_port = 80 if parsed.scheme == "http" else 443
+    if port is not None and port != expected_port:
+        raise MCPToolError(f"导航目标使用了非预期端口：{url}")
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise MCPToolError(f"导航目标不允许访问 localhost：{url}")
+
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(
+                hostname,
+                expected_port,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except socket.gaierror as exc:
+        raise MCPToolError(f"导航目标 DNS 解析失败：{hostname}") from exc
+    if not addresses:
+        raise MCPToolError(f"导航目标 DNS 未返回地址：{hostname}")
+
+    for address in addresses:
+        if not ipaddress.ip_address(address).is_global:
+            raise MCPToolError(f"导航目标解析到非公网地址：{hostname} -> {address}")
+
+
+def _validate_redirect_urls(navigation_result: Any, original_url: str) -> None:
+    """校验导航结果中暴露的重定向后 URL。"""
+
+    serialized = json.dumps(_json_ready(navigation_result), ensure_ascii=False)
+    for redirected_url in re.findall(r"https?://[^\s\"'<>]+", serialized):
+        if redirected_url.rstrip("/\\.,;:)") == original_url.rstrip("/"):
+            continue
+        _validate_public_http_url(redirected_url.rstrip("\\.,;:)"))
 
 
 def _json_ready(value: Any) -> Any:
@@ -290,6 +341,7 @@ async def _context7_query_async(topic: str) -> Any:
 async def _playwright_fetch_page_async(url: str) -> Any:
     """调用 Playwright MCP 读取页面快照。"""
 
+    _validate_public_http_url(url)
     client = _build_mcp_client()
     async with client.session("playwright") as session:
         tools = await _load_mcp_session_tools(session)
@@ -306,6 +358,7 @@ async def _playwright_fetch_page_async(url: str) -> Any:
                 {"input": url},
             ],
         )
+        _validate_redirect_urls(navigation_result, url)
         snapshot_tool = _try_select_tool(
             playwright_tools,
             [("snapshot",), ("content",), ("text",), ("accessibility",)],
@@ -326,6 +379,7 @@ async def _playwright_fetch_page_async(url: str) -> Any:
 async def _devtools_inspect_page_async(url: str) -> Any:
     """调用 Chrome DevTools MCP 检查页面状态。"""
 
+    _validate_public_http_url(url)
     tools = await _get_online_mcp_tools(server_name="devtools")
     devtools_tools = _filter_tools_by_name(tools, ("devtools", "chrome", "page"))
     navigate_tool = _try_select_tool(
@@ -340,6 +394,7 @@ async def _devtools_inspect_page_async(url: str) -> Any:
             {"input": url},
         ],
     )
+    _validate_redirect_urls(navigation_result, url)
     inspect_tool = _try_select_tool(
         devtools_tools,
         [("snapshot",), ("content",), ("evaluate",), ("screenshot",)],

@@ -91,7 +91,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 | 节点 | 主要读取字段 | 主要写入字段 | 路由 / 边界 |
 | --- | --- | --- | --- |
 | `input_guard` | `user_query` | `input_guard_result`、`executed_nodes` | 真实 LLM 结构化输出节点；只审查危险行为（泄露、越权/绕过、直接或间接越狱），不按话题领域拦截；风险不可继续时进入降级准备；否则进入研究分析 |
-| `plan_research` | `user_query`、工作流配置、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：研究计划、最低证据标准、索引、预算、首轮任务；迭代模式：下一轮 `search_tasks`、任务索引、`active_question_ids`、`search_attempt`、分发模式 | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始或迭代 Prompt；初始与迭代均走 `json_object` + 确定性 coerce + Pydantic 校验；`search_provider` 统一映射（`local` / `local_*` → `local_document_search`，其它 → `web_search`）；解析或校验失败时带错误摘要重试 1 次；每次执行统一递增 `search_steps`；Graph 随后固定并行调用 Web 与本地检索节点。规划 Prompt 约束：子问题 ≤5；**合理规划 `search_task` 数量，不无意义展开**（多源/换词靠 iteration，不由代码硬截断）；规划侧本地资料只使用伞类型 `local`，不枚举本地子工具 |
+| `plan_research` | `user_query`、工作流配置、`planning_mode`、`active_question_ids`、`sub_questions`、`minimum_evidence_standard`、`search_iteration_context` | 初始模式：研究计划、最低证据标准、索引、预算、首轮任务；迭代模式：下一轮 `search_tasks`、任务索引、`active_question_ids` | 真实 LLM 结构化输出节点；根据 `planning_mode` 选择初始或迭代 Prompt；初始与迭代均走 `json_object` + 确定性 coerce + Pydantic 校验；`search_provider` 统一映射（`local` / `local_*` → `local_document_search`，其它 → `web_search`）；解析或校验失败时带错误摘要重试 1 次；每次执行统一递增 `search_steps`；Graph 随后固定并行调用 Web 与本地检索节点。规划 Prompt 约束：子问题 ≤5；**合理规划 `search_task` 数量，不无意义展开**（多源/换词靠 iteration，不由代码硬截断）；规划侧本地资料只使用伞类型 `local`，不枚举本地子工具 |
 | `web_search_sub_agent` | `search_tasks` | `web_search_results`、`web_tool_evaluation_records`、`web_hitl_required`、`web_hitl_reason` | 对多个 Web `search_tasks` 做有界任务级并发，单任务内仍按固定顺序调度工具；Tavily / Context7 由代码物化且不进汇总 LLM；仅 SerpAPI 压缩结果进入汇总 LLM 打四维分并判断是否抓正文，代码写入综合 `score` 后 keep top N，再按 LLM 决策（硬分否决/兜底）可选 Playwright 写 `body`；合并时按 URL 去重；不做内部 Agent 循环；细节见本节后文 |
 | `local_document_search_tool` | `search_tasks`、`LOCAL_DOCUMENTS_BASE_PATH`、本地 RAG 向量库路径、结构化 mock 数据配置 | `local_document_results` | 规划任务以伞类型 `local` 进入；对本轮全部伞类型 `local` 任务用 `model_role: local_document_search` **只调用一次**路由 LLM，按 `task_id` 选定一个或多个具体工具（`local_document` / `local_rag` / `structured_mock`）并同轮产出各工具入参（`local_document_query` / `local_rag_query` / `structured_search`），再并行执行；证据结果写回具体 `source_type` 并挂回原 `task_id` / `question_id`。兼容历史具体类型任务则跳过路由直达对应工具 |
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | **观测占位**：仅服务 Playwright 触发的登录/验证码/权限墙；只对 `requires_login=true` 的结果调用 DevTools 观察；记录 `completed=false`，不真正暂停，不因未完成而降级或阻断后续证据治理 |
@@ -101,13 +101,13 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 | `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | **观测占位**：不真正暂停；只记录冲突观测事实，不改写证据正文，不触发降级 |
 | `build_evidence_matrix` | `evidence_items`、`sub_questions`、`entity_index` | `evidence_matrix` | `evidence_matrix` 只存 `question_id`、证据 ID 列表与少量聚合字段；**不**在此把矩阵收录标为 `used_in_final_report` |
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `evidence_sufficiency_result`、`degradation_reason` | 充足性只写入 `evidence_sufficiency_result`；`sufficient` / 分项状态 / `insufficient_question_ids` 均由此结构读取，不再另写顶层镜像字段 |
-| `check_step_budget` | `search_steps`、`max_search_steps`、`evidence_sufficiency_result` | `step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
-| `strategy_iteration` | `evidence_sufficiency_result`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；`search_iteration_context` 中上一轮任务只保留 `task_id` / `query` / `source_type` 摘要；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用外部 worker |
+| `check_step_budget` | `search_steps`、`max_search_steps`、`evidence_sufficiency_result` | `step_budget_exhausted`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
+| `strategy_iteration` | `evidence_sufficiency_result`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_iteration_context` | 实线回到 `plan_research`；`search_iteration_context` 中上一轮任务只保留 `task_id` / `query` / `source_type` 摘要；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用外部 worker |
 | `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations；证据上下文为**全量短目录 + 按题精选落盘长文**（见报告证据供给） |
 | `review_research_report` | `user_query`、`research_goal`、`report_draft`、`evidence_items` | `review_result` | LLM 结构化质量 Review；锚定 `user_query`，只评**同证据可修正**项：问题对齐、引用可追溯、边界披露与过度推断；**不**再评「证据是否充足 / 来源是否够」（那是上游 `check_evidence_sufficiency` 的职责）；`revision_suggestions` 须可在现有证据上落实（改结构、补引用、降调、写 limitations），禁止要求补搜；不评估安全边界；`degraded=true` 时直接放行 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count`、`evidence_items`、`entity_index` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文；定稿时由代码追加引用证据附录 |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 按主图拓扑生成：还原 Web/本地 fan-out 与汇聚 fan-in，标注循环边，未执行节点/边以虚线与 `skipped` 样式保留；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；产物路径统一由 `output_artifacts` 返回；`executed` PNG 按主图拓扑生成：还原 Web/本地 fan-out 与汇聚 fan-in，标注循环边，未执行节点/边以虚线与 `skipped` 样式保留；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
 ### 检索工具契约
 
@@ -119,10 +119,10 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
   - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）。Tavily 不进入汇总 LLM；代码按 `title` / `score` / `url` / `snippet`(取 `content`) / `published_at` 保留并物化为候选。
   - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP；官方文档不进入汇总 LLM、不做搜索相关性打分；代码保留 `docs_result` / `resolve_result`（及 `library_id`）并物化为候选，`snippet` 不承载文档正文；证据层对其采用权威加权分桶，并把 `docs_result` / `resolve_result` 写入 `EvidenceItem`。
   - query 含 URL 时，由 Playwright 抓取该 URL，代码物化为带 `body` 的候选，不进入汇总 LLM。
-  - SerpAPI 结果页正文：keep top N 后由代码解析抓取目标——主决策为 LLM 的 `needs_page_fetch` + 合法 `fetch_url`（必须属于 keep 后 Serp 候选）；`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）仅作否决与兜底：目标条 `relevance_score` 未严格大于该阈值则否决且不改抓其他页；LLM 要求抓取但 `fetch_url` 缺失或不在候选中时，回退为 keep 后 `relevance_score` 最高且严格大于阈值的一条。成功后在该条写入 `body`（先经上述 Playwright 确定性清洗，再截断，上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`，默认 3000），保留原 `snippet`，不二次进入汇总 LLM。该步骤以独立 LangSmith span `fetch_serpapi_page_and_enrich_body` 记录，并在结果中写入紧凑 `page_fetch`（`attempted` / `fetch_url` / `ok` / `body_appended` / `body_chars` / `reason`）便于观测；URL 匹配使用规范化比较。
-  - query 含 URL 的 Playwright 物化以 span `materialize_query_url_playwright_body` 记录。
+  - SerpAPI 结果页正文：keep top N 后由代码解析抓取目标——主决策为 LLM 的 `needs_page_fetch` + 合法 `fetch_url`（必须属于 keep 后 Serp 候选）；`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`（默认 0.7）仅作否决与兜底：目标条 `relevance_score` 未严格大于该阈值则否决且不改抓其他页；LLM 要求抓取但 `fetch_url` 缺失或不在候选中时，回退为 keep 后 `relevance_score` 最高且严格大于阈值的一条。成功后在该条写入 `body`（先经上述 Playwright 确定性清洗，再截断，上限 `WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`，默认 3000），保留候选原 `title` 与 `snippet`，不二次进入汇总 LLM。该步骤以独立 LangSmith span `fetch_serpapi_page_and_enrich_body` 记录，并在结果中写入紧凑 `page_fetch`（`attempted` / `fetch_url` / `ok` / `body_appended` / `body_chars` / `reason`）便于观测；URL 匹配使用规范化比较。
+  - query 含 URL 的 Playwright 物化以 span `materialize_query_url_playwright_body` 记录；span output 显式返回 `candidates` 与 `body_writes`，成功项的 `body_writes` 包含清洗后真正写入候选的完整 `body`、`body_chars` 与 `body_appended=true`。
   - 最终由代码合并 Tavily、Context7、query-URL Playwright 与打分后的 SerpAPI 候选，并按规范化 URL/路径去重（同 URL 优先保留含 `body`、更高分、更完整正文的候选）；该步骤以独立 LangSmith span `merge_all_web_tool_results_by_code` 记录，并写入紧凑 `code_merge`（各来源输入数、合并后数量、`source_counts`、`with_body_count`）；其子 span 包括 `materialize_tavily_candidates`、`materialize_context7_candidates`、`materialize_query_url_playwright_body`。进入汇总 LLM 的输入仅为 SerpAPI 压缩结果；JSON 使用紧凑序列化（无 `indent`）。原始工具输出仍可用于评测记录提取。
-  - Playwright 使用 headless + isolated Chrome；导航与快照必须在同一显式 MCP 会话内完成，避免新会话返回 `about:blank`。
+  - Playwright 使用 headless + isolated Chrome；导航与快照必须在同一显式 MCP 会话内完成，避免新会话返回 `about:blank`。Playwright 与 DevTools 每次导航前必须解析目标地址，导航结果暴露重定向后 URL 时必须再次解析；只允许公网 HTTP(S)，HTTP 仅允许 80 端口、HTTPS 仅允许 443 端口，拒绝 localhost、私网、保留地址、链路本地及其他非公网地址。
   - 单次 LLM 汇总失败时，当前实现使用 SerpAPI 首条结果形成低可信度候选；没有可用结果时不触发 Web HITL。
 - Web HITL 仅服务 Playwright：仅当 Playwright（query URL 抓取或 Serp 结果页抓取）**确定性**检测到登录墙、验证码或权限墙时，才将对应候选标为 `requires_login=true` 并设置 `web_hitl_required=true`。判定以强措辞（如 `please sign in to continue` / `验证码` / `access denied`）、登录路径 URL，或「弱措辞（Sign in/登录）+ 表单线索 / 极短页多次弱措辞」为准；**不得**仅因文档站导航栏出现 `Sign in` / `Log in` / `login` / `登录` 就触发。SerpAPI 汇总 LLM 不输出、不判断 HITL；Tavily、Context7 与“无搜索结果”均不得触发 Web HITL。普通页面 403、超时、空正文或 `about:blank` 只降低可信度，不进 Web HITL。
 - `web_search_hitl_request` 为观测占位：仅对 `requires_login=true` 的结果调用 DevTools 观察；记录 `completed=false`，不真正暂停，不因未完成 HITL 降级。
@@ -157,7 +157,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 - `expected_evidence`、`minimum_evidence_standard`、`evidence_sufficiency_result.question_status` 必须使用同一组 `question_id` 作为 key。
 - `evidence_items` 是唯一证据目录，key 为 `evidence_id`。
 - `conflicts` 是唯一冲突目录，key 为 `conflict_id`。
-- `required_source_types`、`web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
+- `web_hitl_decisions` 等字段属于运行 State，不属于 Studio 入口。
 - 搜索流水线中间结果在其最后一个消费者执行后清空；最终 State 不重复保留 Web、本地与聚类阶段的完整候选结果。
 - 跨结构关联只保存 ID，不复制问题正文或证据正文；证据长文落盘 `outputs/evidence/`，State 只保留 `content_path` 与短 `snippet`。
 - `evidence_items` 与 `conflicts` 由 `evaluate_evidence_quality` **整表替换**（不再使用并行 merge reducer），避免策略迭代残留旧证据；`executed_nodes` 与 `web_tool_evaluation_records` 仍使用列表累加 reducer。
@@ -169,7 +169,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 - 证据不足时必须先进入 `check_step_budget`，不能直接降级。
 - `prepare_degraded_report` 只负责设置降级状态，不负责判断预算，也不负责写报告正文。
 - Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
-- `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"`、`search_dispatch_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
+- `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成（LLM）；`used_in_final_report` / `final_citation_count` 以报告实际引用的合法 `evidence_id` 为准。
 - `safety_review` 在写入 `final_report` 时由**代码**追加 `## 引用证据` 附录（不经 LLM）：只列实际引用的代号与 title；按 `source_type` 区分 Web（非 `local_document` / `structured_mock`）与 Local；Web 有 http(s) URL 时写 `[Exx][title](url)`；无 URL 的 Web 与 `structured_mock` 写 `[Exx] title`；`local_document` 从 `url_or_path` 取 md 文件名，写 `[Exx] \`filename.md\` — title`（title 与文件名 stem 相同时省略 title）。若正文已含同名章节则不重复追加。`local_rag` 归入 Web 分组（chunk 通常带公开文档 URL，便于超链接）。
 - 报告 Prompt 的证据上下文采用分层供给：全量短目录（title / source / url / 短摘要）+ 按题精选落盘长文（有 `content_path`、按可靠性取 top N、单条与总字符封顶）；无长文时须在 limitations 披露摘要级证据边界。
@@ -244,7 +244,6 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 一次完整运行最终应在 State 中提供：
 
 - `final_report`
-- `final_report_path`
 - `output_artifacts`
 - `evaluation_metrics`
 - `executed_nodes`
@@ -390,12 +389,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - `executed_nodes` 记录实际执行路径。
 - `evaluation_metrics` 记录：
   - `run_id`
-  - `total_steps`
   - `executed_nodes`
   - `search_steps / max_search_steps`
   - `review_revision_count / max_review_revisions`
   - `safety_revision_count / max_safety_revisions`
-  - `total_latency_ms`、`total_tokens`，当前 demo 固定为 0
   - `evidence_count`
   - `final_citation_count`
   - `conflict_count`
@@ -406,8 +403,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `safety_risk_level`
   - `source_contribution`
   - `web_hitl_trigger_count_by_source`
-  - `executed_mermaid_png_path`
-- `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；`executed_mermaid` 只保留在 State，不保存 `.mmd` 文件；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
+- `persist_outputs` 使用 UTC 时间戳生成 `run_id`，写入报告、metrics 和实际运行链路 PNG；产物路径只保留在 `output_artifacts`，不保存 `.mmd` 文件；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
 - 实际运行图生成规则：
   - 节点集合固定为主图全部业务节点；已执行节点按职责着色，未执行节点使用 `skipped` 虚线样式。
   - 边集合固定为主图拓扑；已走边用实线，未走边用虚线并标注「未执行」。
@@ -465,6 +461,4 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `REQ-003` | 5–6. Prompt 与模型 | `prompts/*.yml`、`src/llm/prompt_loader.py`、`src/config/settings.py` | `test_plan_research.py`、`test_workflow_config.py`、`test_structured_local_search.py`、`test_research_report_nodes.py` | demo 级完成 |
 | `REQ-004` | 7. 数据与存储 | `src/workflow/artifact_nodes.py`、`outputs/` | `test_artifact_nodes.py` | demo 级完成：实际运行图已还原 fan-out/fan-in 与未执行路径 |
 | `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：HITL 为观测占位（非安全闭环），权限无统一注册表；真实 interrupt HITL 后续补齐 |
-| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/`、`examples/evaluation_cases.jsonl` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 与 20 条固定评测输入已就绪；Trace metadata、latency/tokens 与量化结果仍为后续 |
-
-
+| `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/`、`examples/evaluation_cases.jsonl` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 与 20 条固定评测输入已就绪；延迟与 Token 用量在 LangSmith UI 查看，Trace metadata 与量化结果仍为后续 |

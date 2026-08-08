@@ -21,7 +21,7 @@ class ResearchOpsSummaryEvaluatorTest(unittest.TestCase):
             [
                 {
                     "final_report": "完整报告" * 100,
-                    "final_report_path": "outputs/reports/a.md",
+                    "output_artifacts": {"final_report": "outputs/reports/a.md"},
                     "evidence_sufficient": True,
                     "evidence_sufficiency_score": 0.9,
                     "review_result": {"passed": True, "report_score": 0.85},

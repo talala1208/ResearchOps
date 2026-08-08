@@ -343,14 +343,14 @@ def _write_executed_graph_png(
     runs_dir: Path,
     run_id: str,
     executed_nodes: list[str],
-) -> tuple[str, str]:
+) -> str:
     """静默保存实际运行链路 PNG。"""
 
     mermaid = _build_executed_mermaid(executed_nodes)
     png_path = runs_dir / f"{run_id}_executed.png"
     png_bytes = draw_mermaid_png(mermaid_syntax=mermaid, background_color="white")
     png_path.write_bytes(png_bytes)
-    return mermaid, str(png_path)
+    return str(png_path)
 
 
 def _build_run_id() -> str:
@@ -389,7 +389,7 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
 
     final_report = state["final_report"]
     report_path.write_text(final_report, encoding="utf-8")
-    executed_mermaid, executed_mermaid_png_path = _write_executed_graph_png(
+    executed_mermaid_png_path = _write_executed_graph_png(
         runs_dir=runs_dir,
         run_id=run_id,
         executed_nodes=executed_nodes,
@@ -402,7 +402,6 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
     }
     metrics = {
         "run_id": run_id,
-        "total_steps": len(executed_nodes),
         "executed_nodes": executed_nodes,
         "search_steps": state.get("search_steps", 0),
         "max_search_steps": state.get(
@@ -416,8 +415,6 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         "max_safety_revisions": state.get(
             "max_safety_revisions", workflow_config.max_safety_revisions
         ),
-        "total_latency_ms": 0,
-        "total_tokens": 0,
         "evidence_count": len(state.get("evidence_items", {})),
         "final_citation_count": len(
             state.get("entity_index", {}).get("used_evidence_ids", [])
@@ -432,7 +429,6 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         ),
         "source_contribution": source_contribution,
         "web_hitl_trigger_count_by_source": web_hitl_trigger_count_by_source,
-        "executed_mermaid_png_path": executed_mermaid_png_path,
     }
     metrics_path.write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
@@ -441,9 +437,6 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
 
     return {
         "executed_nodes": ["persist_outputs"],
-        "final_report_path": str(report_path),
-        "executed_mermaid": executed_mermaid,
-        "executed_mermaid_png_path": executed_mermaid_png_path,
         "output_artifacts": {
             "final_report": str(report_path),
             "metrics": str(metrics_path),

@@ -35,7 +35,8 @@ def main() -> None:
     result = graph.invoke({"user_query": user_query})
 
     print("\n=== Smoke Result ===")
-    print(f"final_report_path: {result.get('final_report_path')}")
+    output_artifacts = result.get("output_artifacts", {})
+    print(f"final_report_path: {output_artifacts.get('final_report')}")
     print("\nexecuted_nodes:")
     for node_name in result.get("executed_nodes", []):
         print(f"- {node_name}")

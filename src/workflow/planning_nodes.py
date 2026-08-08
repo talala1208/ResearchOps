@@ -571,7 +571,6 @@ def _run_initial_planning(state: ResearchState) -> dict[str, Any]:
     return {
         "research_goal": plan.research_goal,
         "sub_questions": sub_questions,
-        "required_source_types": plan.required_source_types,
         "expected_evidence": expected_evidence,
         "minimum_evidence_standard": minimum_evidence_standard,
         "entity_index": {
@@ -584,8 +583,6 @@ def _run_initial_planning(state: ResearchState) -> dict[str, Any]:
         "active_question_ids": plan.active_question_ids_after_dispatch or question_ids,
         "search_tasks": [task.model_dump() for task in plan.search_tasks],
         "planning_mode": "initial",
-        "search_dispatch_mode": "initial",
-        "search_attempt": state.get("search_steps", 0) + 1,
         "search_iteration_context": {},
         "search_steps": state.get("search_steps", 0),
         "max_search_steps": state.get(
@@ -642,9 +639,7 @@ def _run_iteration_planning(state: ResearchState) -> dict[str, Any]:
         "search_tasks": [task.model_dump() for task in task_plan.search_tasks],
         "entity_index": entity_index,
         "active_question_ids": task_plan.active_question_ids_after_dispatch,
-        "search_attempt": attempt,
         "planning_mode": "iteration",
-        "search_dispatch_mode": "iteration",
     }
 
 

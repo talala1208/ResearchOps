@@ -204,7 +204,7 @@ spec/spec.md    当前需求与行为的唯一事实来源
 
 - Web 与冲突 HITL 当前只记录观测结果，不会真正暂停和恢复 Graph。
 - 本地 RAG 只读取预构建向量库，不负责生产级索引生命周期。
-- `total_latency_ms` 与 `total_tokens` 当前仍为占位值；发布量化结果前需要接入真实统计。
+- 延迟与 Token 用量统一在 LangSmith UI 中查看，不在 SDK 产物指标中重复记录。
 - 默认离线套件仍需处理历史 dataset 模块与 evaluator 契约问题后才能作为 CI 绿灯基线。
 
 ## 开发约束

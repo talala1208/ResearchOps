@@ -809,7 +809,7 @@ def check_step_budget(state: ResearchState) -> dict[str, Any]:
     """检索预算检查节点。
 
     读取：`search_steps`、`max_search_steps`、`evidence_sufficiency_result`
-    写入：`step_budget_exhausted`、`search_budget_remaining`、`step_budget_reason`
+    写入：`step_budget_exhausted`、`step_budget_reason`
     """
 
     workflow_config = get_workflow_config()
@@ -831,7 +831,6 @@ def check_step_budget(state: ResearchState) -> dict[str, Any]:
     return {
         **record_node(state, "check_step_budget"),
         "step_budget_exhausted": step_budget_exhausted,
-        "search_budget_remaining": search_budget_remaining,
         "step_budget_reason": step_budget_reason,
         "degradation_reason": step_budget_reason or state.get("degradation_reason"),
     }
@@ -902,6 +901,5 @@ def strategy_iteration(state: ResearchState) -> dict[str, Any]:
         "repeated_action_count": repeated_action_count,
         "active_question_ids": insufficient_question_ids,
         "planning_mode": "iteration",
-        "search_dispatch_mode": "iteration",
         "search_iteration_context": search_iteration_context,
     }
