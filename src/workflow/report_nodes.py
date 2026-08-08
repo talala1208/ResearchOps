@@ -820,7 +820,6 @@ def review_research_report(state: ResearchState) -> dict[str, Any]:
             "user_query": state.get("user_query") or "",
             "research_goal": state.get("research_goal") or "",
             "review_pass_score": str(workflow_config.review_pass_score),
-            "evidence_sufficiency_summary": _build_evidence_sufficiency_summary(state),
             "available_evidence_ids": ", ".join(sorted(evidence_items.keys())) or "无",
             "report_draft": state["report_draft"],
         },

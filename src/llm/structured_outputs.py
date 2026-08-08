@@ -233,12 +233,14 @@ class ResearchReportReviewOutput(BaseModel):
 
     passed: bool = Field(description="是否达到可进入 Safety Review 的质量门槛")
     report_score: float = Field(description="总分，0 到 1")
-    source_coverage_score: float = Field(description="来源覆盖分，0 到 1")
+    source_coverage_score: float = Field(
+        description="报告对已有证据 ID 的引用/使用覆盖分，0 到 1；不是检索充足性"
+    )
     citation_completeness_score: float = Field(description="引用完整性分，0 到 1")
     groundedness_score: float = Field(description="主张可追溯分，0 到 1")
     boundary_score: float = Field(description="边界与限制披露分，0 到 1")
     over_inference_risk: float = Field(description="过度推断风险，0 到 1，越高越差")
     revision_suggestions: list[str] = Field(
         default_factory=list,
-        description="若不通过，给出可执行的修正建议列表",
+        description="若不通过，给出同证据可执行的改写建议（对齐/引用/边界）；禁止要求补搜",
     )

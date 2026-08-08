@@ -165,7 +165,7 @@ class StateEntityIndex(TypedDict):
 
 
 class ReviewResult(TypedDict):
-    """报告质量 Review 结果。"""
+    """报告质量 Review 结果（同证据可修正项；不含检索充足性判定）。"""
 
     passed: bool
     report_score: float

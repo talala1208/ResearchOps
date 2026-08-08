@@ -365,6 +365,9 @@ class ResearchReportNodesTest(unittest.TestCase):
         )
         self.assertIn("比较两款 AI 编程助手", captured_prompts[0])
         self.assertIn("用户最初的研究问题", captured_prompts[0])
+        self.assertIn("可用证据 ID", captured_prompts[0])
+        self.assertNotIn("证据充足性摘要", captured_prompts[0])
+        self.assertIn("E1", captured_prompts[0])
 
 
 class CitedEvidenceAppendixTest(unittest.TestCase):

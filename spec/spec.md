@@ -123,7 +123,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `strategy_iteration` | `evidence_sufficiency_result`、`search_tasks`、`iteration_count` | `iteration_count`、`repeated_action_count`、`active_question_ids`、`planning_mode`、`search_dispatch_mode`、`search_iteration_context` | 实线回到 `plan_research`；`search_iteration_context` 中上一轮任务只保留 `task_id` / `query` / `source_type` 摘要；可在 `ENABLE_STRATEGY_EXTERNAL_WORKER=true` 时调用外部 worker |
 | `prepare_degraded_report` | `input_guard_result`、`degradation_reason`、`step_budget_reason`、`evidence_sufficiency_result`、`safety_review_result`、`safety_revision_count` | `degraded`、`degradation_reason`、`safety_revision_count` | 已实现确定性降级状态整理；输入安全检查不通过时必须说明原因；只设置降级状态，不写报告正文 |
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations；证据上下文为**全量短目录 + 按题精选落盘长文**（见报告证据供给） |
-| `review_research_report` | `user_query`、`research_goal`、`report_draft`、`evidence_matrix`、`evidence_items`、`minimum_evidence_standard`、`evidence_sufficiency_result` | `review_result` | LLM 结构化质量 Review；必须以用户最初 `user_query` 为评价锚点判断问题对齐与回答完整度，并输出评分与 `revision_suggestions`；不评估安全边界；`degraded=true` 时直接放行 |
+| `review_research_report` | `user_query`、`research_goal`、`report_draft`、`evidence_items` | `review_result` | LLM 结构化质量 Review；锚定 `user_query`，只评**同证据可修正**项：问题对齐、引用可追溯、边界披露与过度推断；**不**再评「证据是否充足 / 来源是否够」（那是上游 `check_evidence_sufficiency` 的职责）；`revision_suggestions` 须可在现有证据上落实（改结构、补引用、降调、写 limitations），禁止要求补搜；不评估安全边界；`degraded=true` 时直接放行 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count`、`evidence_items`、`entity_index` | `safety_review_result`、`final_report`，并清空 `report_draft` | 已实现规则安全审查；通过后 State 只保留 `final_report` 作为报告正文；定稿时由代码追加引用证据附录 |
 | `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `final_report_path`、`executed_mermaid`、`executed_mermaid_png_path`、`output_artifacts`、`evaluation_metrics` | 已实现报告 Markdown、metrics JSON、实际运行链路 PNG 静默保存；`executed` PNG 当前为线性示意（由 `executed_nodes` 列表生成，不还原 fan-out/fan-in）；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
 
@@ -200,7 +200,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - 报告 Prompt 的证据上下文采用分层供给：全量短目录（title / source / url / 短摘要）+ 按题精选落盘长文（有 `content_path`、按可靠性取 top N、单条与总字符封顶）；无长文时须在 limitations 披露摘要级证据边界。
 - Input Guard 不通过时跳过规划和检索，但仍经过报告 Review、Safety Review 和产物持久化。
 - `degraded = true` 的报告由质量 Review 直接放行，继续执行 Safety Review。
-- `review_research_report` 负责研究质量，不负责安全审查；评价须锚定用户最初 `user_query`（是否答到问题、有无偏题/漏答），不以空泛文笔点评替代；不通过且预算未耗尽时，下一次生成必须消费 `revision_suggestions`。
+- `review_research_report` 负责研究质量中的**写法与可核验性**，不负责安全审查，也不负责证据充足性；评价须锚定用户最初 `user_query`（是否答到问题、有无偏题/漏答、引用与边界是否成立），不以空泛文笔点评替代，不得因「证据数量/来源不够」单独 fail（充足性已由上游判定）；`revision_suggestions` 只能是同证据可执行的改写指引；不通过且预算未耗尽时，下一次生成必须消费这些建议。
 - `safety_review` 负责安全边界，不负责研究质量评分；安全不通过再生成时，报告 Prompt 须附带风险与保守改写约束。
 - Web HITL 与冲突 HITL 均为观测占位：写入决策/观察记录与 metrics，不构成安全闭环，当前版本忽略未完成 HITL，不因此降级。
 - 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点；当前为线性示意，不需要保存 `.mmd` 文件。
@@ -315,7 +315,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `QuestionEvidenceStatus` | 问题与 Priority、证据数量、来源覆盖、最低标准、加权分和缺口原因 | `priority_weight` 参与整体加权评分 |
 | `EvidenceSufficiencyResult` | `sufficient`、`overall_score`、`threshold`、`high_priority_all_met`、`question_status`、缺口与降级字段 | `question_status` 的 key 必须存在于 `sub_questions` |
 | `StateEntityIndex` | 问题 ID、按问题关联的证据/冲突/任务 ID、最终使用证据 ID | 只保存 ID，不复制业务正文 |
-| `ReviewResult` | `passed`、总分、来源覆盖、引用完整性、groundedness、边界、过度推断风险、修正建议 | Review 只评估研究质量 |
+| `ReviewResult` | `passed`、总分、`source_coverage_score`（报告对已有证据的引用/使用覆盖，非检索充足性）、引用完整性、groundedness、边界、过度推断风险、修正建议 | Review 只评同证据可修正的质量项 |
 | `SafetyReviewResult` | `safety_pass`、风险等级、风险列表、降级标志与原因 | Input Guard 与 Safety Review 当前共用该 State 类型 |
 
 
