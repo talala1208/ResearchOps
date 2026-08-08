@@ -137,20 +137,20 @@ class WebSearchSubAgentResultOutput(BaseModel):
 
     results: list[WebSearchResultOutput] = Field(
         description=(
-            "SerpAPI 候选结果对象列表；每项必须是对象，"
+            "主搜索候选结果对象列表；每项必须是对象，"
             "禁止返回索引数字数组（例如 [1] 或 [0, 2]）。"
         ),
     )
     needs_page_fetch: bool = Field(
         description=(
-            "是否需要抓取一条 Serp 结果页正文；"
+            "是否需要抓取一条主搜索结果页正文；"
             "snippet 已覆盖 expected_evidence 时应为 false。"
         ),
     )
     fetch_url: str | None = Field(
         default=None,
         description=(
-            "需要抓取时，必须是本批 serpapi 候选中的一条 http(s) URL；"
+            "需要抓取时，必须是本批主搜索候选中的一条 http(s) URL；"
             "不需要抓取时为 null。"
         ),
     )

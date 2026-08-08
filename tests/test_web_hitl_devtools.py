@@ -59,7 +59,7 @@ class WebHITLDevToolsTest(unittest.TestCase):
                     "task_id": "T1",
                     "question_id": "Q1",
                     "url_or_path": "https://example.com",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "requires_login": True,
                 }
             ],

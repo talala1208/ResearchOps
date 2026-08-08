@@ -279,7 +279,7 @@ def serp_api_search(query: str) -> str:
 
     return json.dumps(
         {
-            "provider": "serpapi",
+            "provider": "serp",
             "ok": True,
             "query": query,
             "results": results,
@@ -378,7 +378,7 @@ def you_com_api_search(query: str) -> str:
 
     return json.dumps(
         {
-            "provider": "you_com",
+            "provider": "ydc",
             "ok": True,
             "query": query,
             "results": results,
@@ -494,6 +494,7 @@ def _attach_serpapi_composite_scores(result: dict[str, Any]) -> dict[str, Any]:
             continue
         normalized = dict(item)
         if _is_serpapi_result(normalized):
+            provider = _web_search_provider()
             score = round(
                 _score_or_default(normalized.get("source_confidence_score"), 0.5) * 0.35
                 + _score_or_default(normalized.get("freshness_score"), 0.5) * 0.15
@@ -506,8 +507,12 @@ def _attach_serpapi_composite_scores(result: dict[str, Any]) -> dict[str, Any]:
             if isinstance(url, str):
                 normalized["url"] = url
                 normalized["url_or_path"] = url
-            normalized["score_bucket"] = "serpapi"
-            normalized["scored_by"] = "serpapi_llm"
+            if not isinstance(normalized.get("source_name"), str) or not normalized[
+                "source_name"
+            ]:
+                normalized["source_name"] = provider
+            normalized["score_bucket"] = provider
+            normalized["scored_by"] = f"{provider}_llm"
             # HITL 字段由 Playwright 路径写入，汇总 LLM 不输出
             normalized.setdefault("requires_login", False)
             normalized.setdefault("blocked_reason", None)
@@ -1475,12 +1480,16 @@ def _candidate_richness_key(item: dict[str, Any]) -> tuple[Any, ...]:
     snippet_len = len(snippet) if isinstance(snippet, str) else 0
     has_body = 1 if body_len > 0 else 0
     score = _candidate_composite_score(item)
+    source_name = str(item.get("source_name") or "").lower()
     source_rank = {
         "playwright": 4,
+        "serp": 3,
         "serpapi": 3,
+        "ydc": 3,
+        "you_com": 3,
         "tavily": 2,
         "context7": 1,
-    }.get(str(item.get("source_name") or "").lower(), 0)
+    }.get(source_name, 0)
     return (has_body, score, body_len + docs_len, snippet_len, source_rank)
 
 
@@ -1579,12 +1588,13 @@ def _merge_all_web_tool_results_by_code(
     finalized["tool_evaluation_records"] = _build_web_tool_evaluation_records(
         tool_outputs
     )
+    primary_provider = _web_search_provider()
     finalized["code_merge"] = {
         "input_counts": {
             "tavily": len(tavily_candidates),
             "context7": len(context7_candidates),
             "playwright": len(playwright_candidates),
-            "serpapi": sum(
+            primary_provider: sum(
                 1
                 for item in serp_result.get("results", [])
                 if isinstance(item, dict)
@@ -1683,18 +1693,19 @@ def _compact_playwright_output(output: Any, *, url: str | None) -> dict[str, Any
 def _compact_tool_outputs_for_summarize(
     tool_outputs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """兼容旧调用：返回仅含 SerpAPI 的压缩结构。
+    """兼容旧调用：返回仅含当前主搜索 provider 的压缩结构。
 
     新路径请优先使用 `_extract_serpapi_results_for_summarize`。
     """
 
+    search_tool_name, _ = _configured_search_tool()
     return [
         {
-            "tool_name": "serp_api_search",
+            "tool_name": search_tool_name,
             "ok": True,
             "error": None,
             "output": {
-                "provider": "serpapi",
+                "provider": _web_search_provider(),
                 "results": _extract_serpapi_results_for_summarize(tool_outputs),
             },
         }
@@ -1702,13 +1713,14 @@ def _compact_tool_outputs_for_summarize(
 
 
 def _empty_serpapi_summarize_result() -> dict[str, Any]:
-    """无可用 SerpAPI 结果时跳过汇总 LLM。"""
+    """无可用主搜索结果时跳过汇总 LLM。"""
 
+    provider = _web_search_provider()
     return {
         "results": [],
         "needs_page_fetch": False,
         "fetch_url": None,
-        "fetch_reason": "无可用 SerpAPI 结果，跳过汇总 LLM。",
+        "fetch_reason": f"无可用 {provider} 结果，跳过汇总 LLM。",
         "web_hitl_required": False,
         "hitl_reason": None,
     }
@@ -1989,7 +2001,7 @@ def _coerce_web_summarize_dict(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(url, str) and url.strip():
                 result["url_or_path"] = url.strip()
         if not isinstance(result.get("source_name"), str) or not result["source_name"]:
-            result["source_name"] = "serpapi"
+            result["source_name"] = _web_search_provider()
         coerced_results.append(result)
     data["results"] = coerced_results
 
@@ -2014,21 +2026,22 @@ def _summarize_web_tool_outputs(
         return _empty_serpapi_summarize_result()
 
     prompt = load_prompt("web_search_subagent.yml")
-    user_prompt = render_prompt_template(
-        prompt["user_prompt_template"],
-        {
-            "task_id": task["task_id"],
-            "question_id": task["question_id"],
-            "question": task.get("question") or task["query"],
-            "expected_evidence_json": json.dumps(
-                task.get("expected_evidence"),
-                ensure_ascii=False,
-            ),
-            "query": task["query"],
-            "source_type": task["source_type"],
-            "serpapi_results_json": json.dumps(serp_results, ensure_ascii=False),
-        },
-    )
+    source_name = _web_search_provider()
+    prompt_vars = {
+        "source_name": source_name,
+        "task_id": task["task_id"],
+        "question_id": task["question_id"],
+        "question": task.get("question") or task["query"],
+        "expected_evidence_json": json.dumps(
+            task.get("expected_evidence"),
+            ensure_ascii=False,
+        ),
+        "query": task["query"],
+        "source_type": task["source_type"],
+        "search_results_json": json.dumps(serp_results, ensure_ascii=False),
+    }
+    system_prompt = render_prompt_template(prompt["system_prompt"], prompt_vars)
+    user_prompt = render_prompt_template(prompt["user_prompt_template"], prompt_vars)
     # 硬断言：汇总 prompt 不得混入其他工具输出
     forbidden = ("tavily_mcp_search", "context7_mcp_query", "playwright_mcp_fetch")
     if any(marker in user_prompt for marker in forbidden):
@@ -2039,7 +2052,7 @@ def _summarize_web_tool_outputs(
     )
     response = model.invoke(
         [
-            ("system", prompt["system_prompt"]),
+            ("system", system_prompt),
             ("human", user_prompt),
         ]
     )

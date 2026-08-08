@@ -18,7 +18,7 @@ def _base_candidate(**overrides: object) -> dict:
     candidate = {
         "question_id": "Q1",
         "source_type": "blog",
-        "source_name": "serpapi",
+        "source_name": "serp",
         "url_or_path": "https://example.com/a",
         "title": "标题",
         "snippet": "摘要",

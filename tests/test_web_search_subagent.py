@@ -49,7 +49,7 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
                     "title": "示例文章",
                     "url_or_path": "https://example.com/article",
                     "snippet": "搜索摘要已经覆盖查询主题。",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "published_at": None,
                     "requires_login": False,
                     "blocked_reason": "HTTP 403 被拦截，无法获取页面正文",
@@ -83,7 +83,7 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
                     "url": "https://example.com/login-required",
                     "url_or_path": "https://example.com/login-required",
                     "snippet": "teaser",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "requires_login": False,
                 }
             ],
@@ -135,7 +135,7 @@ class WebSearchSubAgentParseTest(unittest.TestCase):
                     "url": "https://docs.example.com/models",
                     "url_or_path": "https://docs.example.com/models",
                     "snippet": "models",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "requires_login": False,
                     "body": docs_page,
                 }
@@ -345,7 +345,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                 "ok": True,
                 "error": None,
                 "output": {
-                    "provider": "serpapi",
+                    "provider": "serp",
                     "results": [
                         {
                             "title": f"T{index}",
@@ -446,7 +446,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                 "ok": True,
                 "error": None,
                 "output": {
-                    "provider": "serpapi",
+                    "provider": "serp",
                     "results": [
                         {
                             "title": "Serp Title",
@@ -735,7 +735,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp Low",
                     "url_or_path": "https://example.com/low",
                     "snippet": "low",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.2,
                     "answer_coverage_score": 0.2,
                     "source_confidence_score": 0.2,
@@ -746,7 +746,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp High",
                     "url_or_path": "https://example.com/high",
                     "snippet": "high",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.9,
                     "answer_coverage_score": 0.9,
                     "source_confidence_score": 0.9,
@@ -757,7 +757,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp Mid",
                     "url_or_path": "https://example.com/mid",
                     "snippet": "mid",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.6,
                     "answer_coverage_score": 0.6,
                     "source_confidence_score": 0.6,
@@ -790,7 +790,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "url": "https://example.com/high",
                     "url_or_path": "https://example.com/high",
                     "snippet": "high",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.81,
                     "answer_coverage_score": 0.1,
                     "source_confidence_score": 0.1,
@@ -819,7 +819,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp Edge",
                     "url_or_path": "https://example.com/edge",
                     "snippet": "edge",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.7,
                     "answer_coverage_score": 0.9,
                     "source_confidence_score": 0.9,
@@ -845,7 +845,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp High",
                     "url_or_path": "https://example.com/high",
                     "snippet": "enough",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.95,
                     "answer_coverage_score": 0.9,
                     "source_confidence_score": 0.9,
@@ -871,7 +871,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp Mid",
                     "url_or_path": "https://example.com/mid",
                     "snippet": "mid",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.75,
                     "answer_coverage_score": 0.2,
                     "source_confidence_score": 0.5,
@@ -883,7 +883,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp High",
                     "url_or_path": "https://example.com/high",
                     "snippet": "high",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.9,
                     "answer_coverage_score": 0.2,
                     "source_confidence_score": 0.5,
@@ -914,7 +914,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "url": "https://example.com/high",
                     "url_or_path": "https://example.com/high",
                     "snippet": "original snippet",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "relevance_score": 0.9,
                     "answer_coverage_score": 0.1,
                     "source_confidence_score": 0.1,
@@ -975,7 +975,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp",
                     "url_or_path": "https://example.com/high/",
                     "snippet": "snippet",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                 }
             ]
         }
@@ -1001,7 +1001,7 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                         "url": "https://example.com/same",
                         "url_or_path": "https://example.com/same",
                         "snippet": "short",
-                        "source_name": "serpapi",
+                        "source_name": "serp",
                         "relevance_score": 0.9,
                         "score": 0.8,
                     }
@@ -1067,24 +1067,25 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
                     "title": "Serp",
                     "url_or_path": "https://serp.example/a",
                     "snippet": "serp",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "score": 0.7,
                 }
             ],
             "web_hitl_required": False,
             "hitl_reason": None,
         }
-        merged = web_search_subagent._merge_all_web_tool_results_by_code(
-            tool_outputs,
-            serp_result,
-        )
+        with patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "serp"}):
+            merged = web_search_subagent._merge_all_web_tool_results_by_code(
+                tool_outputs,
+                serp_result,
+            )
         self.assertEqual(len(merged["results"]), 2)
         self.assertIn("tool_evaluation_records", merged)
         self.assertEqual(merged["code_merge"]["input_counts"]["tavily"], 1)
-        self.assertEqual(merged["code_merge"]["input_counts"]["serpapi"], 1)
+        self.assertEqual(merged["code_merge"]["input_counts"]["serp"], 1)
         self.assertEqual(merged["code_merge"]["merged_count"], 2)
         self.assertEqual(merged["code_merge"]["source_counts"]["tavily"], 1)
-        self.assertEqual(merged["code_merge"]["source_counts"]["serpapi"], 1)
+        self.assertEqual(merged["code_merge"]["source_counts"]["serp"], 1)
 
     def test_dispatch_does_not_call_external_worker_in_web_search(self) -> None:
         """Web Search 工具池不包含 Claude 或 Codex。"""
@@ -1186,7 +1187,7 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             {
                 "results": [
                     {
-                        "source_name": "serpapi",
+                        "source_name": "serp",
                         "title": "LangSmith Pricing",
                         "url": "https://www.langchain.com/pricing",
                         "snippet": "Plans",
@@ -1211,6 +1212,33 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             "https://www.langchain.com/pricing",
         )
 
+    def test_coerce_fills_source_name_from_web_search_provider(self) -> None:
+        """缺省 source_name 时应按 WEB_SEARCH_PROVIDER 回填。"""
+
+        with patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "ydc"}):
+            coerced = web_search_subagent._coerce_web_summarize_dict(
+                {
+                    "results": [
+                        {
+                            "title": "You.com result",
+                            "url_or_path": "https://example.com/ydc",
+                            "snippet": "snippet",
+                            "published_at": None,
+                            "relevance_score": 0.8,
+                            "answer_coverage_score": 0.5,
+                            "source_confidence_score": 0.7,
+                            "freshness_score": 0.5,
+                            "score_reason": "主搜索候选",
+                        }
+                    ],
+                    "needs_page_fetch": False,
+                    "fetch_url": None,
+                    "fetch_reason": None,
+                }
+            )
+
+        self.assertEqual(coerced["results"][0]["source_name"], "ydc")
+
     def test_summarize_uses_json_object_response_format(self) -> None:
         """汇总调用应绑定 json_object，再自行归一化。"""
 
@@ -1230,6 +1258,7 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
                 return self
 
             def invoke(self, messages):  # noqa: ANN001
+                captured["messages"] = messages
                 return FakeResponse()
 
         with (
@@ -1271,6 +1300,10 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             captured["bind"],
             {"response_format": {"type": "json_object"}},
         )
+        messages = captured["messages"]
+        assert isinstance(messages, list)
+        self.assertIn("source_name 固定为 serp", messages[0][1])
+        self.assertIn("source_name 必须为 serp", messages[1][1])
         self.assertEqual(result["results"], [])
         self.assertFalse(result["needs_page_fetch"])
 

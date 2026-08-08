@@ -175,8 +175,13 @@ def _score_bucket(result: dict[str, Any]) -> str:
         return "context7"
     if "tavily" in source_name:
         return "tavily"
+    if (
+        source_name in {"ydc", "you_com", "youcom"}
+        or "you_com" in source_name
+    ):
+        return "ydc"
     if "serp" in source_name:
-        return "serpapi"
+        return "serp"
     if "playwright" in source_name:
         return "playwright"
     return "other"
@@ -235,7 +240,7 @@ def _score_result(result: dict[str, Any]) -> dict[str, float | str]:
             + answer_coverage_score * 0.25,
             4,
         )
-    elif bucket in {"serpapi", "playwright"}:
+    elif bucket in {"serp", "ydc", "serpapi", "playwright"}:
         relevance_score = _score_or_default(
             result.get("relevance_score"),
             0.75 if result.get("snippet") or result.get("body") else 0.0,

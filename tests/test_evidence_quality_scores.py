@@ -25,7 +25,7 @@ class EvidenceQualityScoreTest(unittest.TestCase):
         scores = _score_result(
             {
                 "source_type": "blog",
-                "source_name": "serpapi",
+                "source_name": "serp",
                 "published_at": "2026-01-01",
                 "snippet": "候选证据",
                 "relevance_score": 0.9,
@@ -39,7 +39,7 @@ class EvidenceQualityScoreTest(unittest.TestCase):
         self.assertEqual(scores["answer_coverage_score"], 0.8)
         self.assertEqual(scores["source_confidence_score"], 0.7)
         self.assertEqual(scores["freshness_score"], 0.6)
-        self.assertEqual(scores["score_bucket"], "serpapi")
+        self.assertEqual(scores["score_bucket"], "serp")
         self.assertNotIn("authority_score", scores)
         # authority(blog=0.65)*0.2 + 0.7*0.15 + 0.6*0.15 + 0.9*0.3 + 0.8*0.2
         self.assertAlmostEqual(scores["reliability_score"], 0.755)
@@ -182,15 +182,15 @@ class EvidenceQualityScoreTest(unittest.TestCase):
                             },
                             {
                                 "source_type": "blog",
-                                "source_name": "serpapi",
+                                "source_name": "serp",
                                 "url_or_path": "https://example.com/page",
                                 "title": "Serp Page",
                                 "snippet": "short snippet",
                                 "body": "full page body text " * 30,
                                 "collected_by": "web_search_subagent",
                                 "published_at": None,
-                                "score_bucket": "serpapi",
-                                "scored_by": "serpapi_llm",
+                                "score_bucket": "serp",
+                                "scored_by": "serp_llm",
                                 "source_confidence_score": 0.7,
                                 "relevance_score": 0.8,
                                 "answer_coverage_score": 0.7,
@@ -210,7 +210,7 @@ class EvidenceQualityScoreTest(unittest.TestCase):
 
             items = list(result["evidence_items"].values())
             context7 = next(item for item in items if item["source_name"] == "context7")
-            serp = next(item for item in items if item["source_name"] == "serpapi")
+            serp = next(item for item in items if item["source_name"] == "serp")
 
             self.assertNotIn("docs_result", context7)
             self.assertNotIn("body", serp)

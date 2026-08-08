@@ -102,7 +102,7 @@ class ToolReturnsTest(unittest.TestCase):
             result = serp_api_search.invoke("Cursor docs")
 
         payload = json.loads(result)
-        self.assertEqual(payload["provider"], "serpapi")
+        self.assertEqual(payload["provider"], "serp")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["results"][0]["url"], "https://docs.cursor.com")
         self.assertEqual(payload["results"][0]["published_at"], "2026-01-01")
@@ -157,7 +157,7 @@ class ToolReturnsTest(unittest.TestCase):
 
         payload = json.loads(result)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["provider"], "you_com")
+        self.assertEqual(payload["provider"], "ydc")
         self.assertEqual(payload["results"][0]["url"], "https://example.com/a")
         self.assertIn("desc", payload["results"][0]["snippet"])
         self.assertEqual(payload["results"][0]["published_at"], "2026-04-01T19:00:51")
@@ -258,7 +258,7 @@ class ToolReturnsTest(unittest.TestCase):
                     "title": "Cursor Docs",
                     "url_or_path": "https://docs.cursor.com",
                     "snippet": "Cursor docs summary",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "published_at": None,
                     "requires_login": False,
                     "blocked_reason": None,

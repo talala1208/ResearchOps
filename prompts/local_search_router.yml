@@ -28,7 +28,7 @@ system_prompt: |
   - 需要本地笔记/经验时可含 local_document。
   - 意图含糊且可能跨源时，可同时选择多个相关工具。
   - 若 tools 含 local_rag：local_rag_query 必填非空（可改写为更适合向量检索的 query）；否则 local_rag_query 必须为 null。
-  - 若 tools 含 local_document：local_document_query 必填非空（可改写为更适合关键词检索的 query）；否则 local_document_query 必须为 null。
+  - 若 tools 含 local_document：local_document_query 必填非空（改写为更适合关键词检索的中文 query，勿用英文）；否则 local_document_query 必须为 null。
   - 若 tools 含 structured_mock：structured_search 必填；search_terms 为参数化 LIKE 关键词，不含通配符或引号；sql_search_statement 仅作可观测说明，不直接执行；只面向 ai_products 表语义，禁止写入/DDL/多语句。
   - 若 tools 不含 structured_mock：structured_search 必须为 null。
   - 每个任务 reasoning 用一句话说明工具选择依据。

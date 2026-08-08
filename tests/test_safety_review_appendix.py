@@ -22,7 +22,7 @@ class SafetyReviewAppendixTest(unittest.TestCase):
                     "evidence_id": "E1",
                     "question_id": "Q1",
                     "source_type": "blog",
-                    "source_name": "serpapi",
+                    "source_name": "serp",
                     "url_or_path": "https://example.com/a",
                     "title": "网页标题",
                     "snippet": "s",

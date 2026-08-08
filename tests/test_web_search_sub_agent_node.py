@@ -37,7 +37,7 @@ def _sample_subagent_result(
                 "title": title,
                 "url_or_path": f"https://example.com/{title}",
                 "snippet": f"snippet for {title}",
-                "source_name": "serpapi",
+                "source_name": "serp",
                 "published_at": None,
                 "requires_login": False,
                 "blocked_reason": None,
