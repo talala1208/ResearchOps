@@ -1,4 +1,4 @@
-"""证据治理、HITL 观测占位、证据充足性与检索预算节点。"""
+"""证据治理、冲突 HITL、证据充足性与检索预算节点。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import os
 import re
 from collections import defaultdict
 from typing import Any
+
+from langgraph.types import interrupt
 
 from src.artifacts.evidence_content import (
     extract_candidate_long_text,
@@ -675,29 +677,110 @@ def evaluate_evidence_quality(state: ResearchState) -> dict[str, Any]:
 
 
 def request_human_review(state: ResearchState) -> dict[str, Any]:
-    """冲突 HITL 观测占位节点。
+    """暂停首个已触发的证据冲突，并在恢复后记录人工决策。"""
 
-    不真正暂停，不改写证据，不因未完成而降级；仅记录观测事实。
-    """
+    conflicts = state.get("conflicts", {})
+    pending = next(
+        (
+            conflicts[conflict_id]
+            for conflict_id in sorted(conflicts)
+            if conflicts[conflict_id]["hitl_triggered"]
+        ),
+        None,
+    )
+    if pending is None:
+        return {
+            **record_node(state, "request_human_review"),
+            "hitl_decisions": [],
+            "hitl_required": False,
+        }
 
-    decisions = []
-    for conflict in state.get("conflicts", {}).values():
-        if not conflict["hitl_triggered"]:
-            continue
-        decisions.append(
+    evidence_ids = pending["evidence_ids"]
+    if len(evidence_ids) != 2:
+        raise ValueError("冲突 HITL 必须且只能关联两条证据")
+    evidence_items = state.get("evidence_items", {})
+    missing_ids = [item_id for item_id in evidence_ids if item_id not in evidence_items]
+    if missing_ids:
+        raise ValueError(f"冲突 HITL 引用了不存在的证据：{missing_ids}")
+
+    evidence_views = []
+    for label, evidence_id in zip(("A", "B"), evidence_ids, strict=True):
+        item = evidence_items[evidence_id]
+        evidence_views.append(
             {
-                "hitl_type": "evidence_conflict",
-                "conflict_id": conflict["conflict_id"],
-                "question_id": conflict["question_id"],
-                "completed": False,
-                "decision": "observation_placeholder_no_user_decision",
-                "reason": conflict["conflict_summary"],
+                "label": label,
+                "evidence_id": evidence_id,
+                "title": item["title"],
+                "snippet": item["snippet"],
+                "source_name": item["source_name"],
+                "reliability_score": item["reliability_score"],
             }
         )
 
+    response = interrupt(
+        {
+            "hitl_type": "evidence_conflict",
+            "conflict_id": pending["conflict_id"],
+            "question_id": pending["question_id"],
+            "conflict_summary": pending["conflict_summary"],
+            "evidence": evidence_views,
+            "options": [
+                "prefer_evidence_a",
+                "prefer_evidence_b",
+                "keep_both_and_disclose",
+                "ignore_conflict",
+            ],
+        }
+    )
+    if not isinstance(response, dict):
+        raise ValueError("冲突 HITL 恢复值必须是对象")
+    if response.get("conflict_id") != pending["conflict_id"]:
+        raise ValueError("冲突 HITL 恢复值的 conflict_id 与待处理冲突不一致")
+
+    decision = response.get("decision")
+    allowed_decisions = {
+        "prefer_evidence_a",
+        "prefer_evidence_b",
+        "keep_both_and_disclose",
+        "ignore_conflict",
+    }
+    if decision not in allowed_decisions:
+        raise ValueError(f"不支持的冲突 HITL 决策：{decision}")
+
+    updated_conflict = dict(pending)
+    if decision == "prefer_evidence_a":
+        updated_conflict["preferred_evidence_id"] = evidence_ids[0]
+    elif decision == "prefer_evidence_b":
+        updated_conflict["preferred_evidence_id"] = evidence_ids[1]
+    elif decision == "keep_both_and_disclose":
+        updated_conflict["preferred_evidence_id"] = None
+    reason = response.get("reason")
+    normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+    updated_conflict.update(
+        {
+            "resolution": decision,
+            "reviewed_by_human": True,
+            "resolution_reason": normalized_reason,
+        }
+    )
+
     return {
         **record_node(state, "request_human_review"),
-        "hitl_decisions": decisions,
+        "conflicts": {**conflicts, pending["conflict_id"]: updated_conflict},
+        "hitl_decisions": [
+            {
+                "hitl_type": "evidence_conflict",
+                "conflict_id": pending["conflict_id"],
+                "question_id": pending["question_id"],
+                "completed": True,
+                "decision": decision,
+                "preferred_evidence_id": updated_conflict.get(
+                    "preferred_evidence_id"
+                ),
+                "reason": normalized_reason,
+            }
+        ],
+        "hitl_required": False,
     }
 
 

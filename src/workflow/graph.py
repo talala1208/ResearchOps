@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.graph import StateGraph
 
 from src.schemas.state import ResearchInput, ResearchState
@@ -48,7 +50,7 @@ from src.workflow.nodes import (
 )
 
 
-def build_graph():
+def build_graph(checkpointer: Any | None = None):
     """构建并编译 ResearchOps Agent 主 Graph。"""
 
     builder = StateGraph(ResearchState, input_schema=ResearchInput)
@@ -74,7 +76,7 @@ def build_graph():
 
     add_workflow_edges(builder)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 graph = build_graph()

@@ -288,7 +288,10 @@ def _build_conflicts_summary(state: ResearchState) -> str:
         lines.append(
             f"- {conflict['conflict_id']} / {conflict['question_id']}："
             f"{conflict['conflict_summary']}；"
-            f"preferred={conflict.get('preferred_evidence_id')}"
+            f"preferred={conflict.get('preferred_evidence_id')}；"
+            f"resolution={conflict.get('resolution')}；"
+            f"reviewed_by_human={conflict.get('reviewed_by_human', False)}；"
+            f"reason={conflict.get('resolution_reason')}"
         )
     return "\n".join(lines)
 

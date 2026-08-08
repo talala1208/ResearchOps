@@ -1,6 +1,6 @@
 # ResearchOps Agent 规格
 
-> 状态：草案 · 版本：0.4.7 · 更新日期：2026-08-08
+> 状态：草案 · 版本：0.4.8 · 更新日期：2026-08-08
 > 本文件是 ResearchOps Agent 当前需求、行为边界、核心契约与验收标准的唯一事实来源。
 
 ## 1. 项目概要
@@ -12,7 +12,7 @@
 ### 解决方案
 
 ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为子问题和最低证据标准，通过多源检索、工具输出清洗、证据准入、证据质量评估、极简语义冲突识别、LLM 报告生成与质量 Review、安全审查和本地产物持久化，生成一份可追溯、可降级、可评估的 Markdown 研究报告。
-Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降级），稳定后再补真实人机接管。
+Web HITL 当前仍为观测占位；证据冲突 HITL 使用 LangGraph `interrupt + resume` 暂停并接收人工决策。
 第一版只做 demo 级闭环，优先证明 Agentic Workflow、证据治理、LangSmith 观测评估和安全边界设计，不追求生产级数据源覆盖或复杂前端。
 
 ### 成功指标
@@ -33,7 +33,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 - 支持研究计划、子问题拆解、搜索任务分发、证据治理、报告生成、质量 Review 和安全审查的完整流程。
 - 支持 Web Search、本地文档搜索、本地向量 RAG、结构化 mock 数据四类数据源；Graph 固定并行调用 Web 与本地检索节点，各节点按 `source_type` 内部过滤任务。
 - 支持 Web Search 登录墙、验证码、反爬场景的 HITL **观测占位**路由和 DevTools 页面观察；不真正暂停、不因 `completed=false` 降级；真实人机接管为后续能力。
-- 支持证据语义冲突触发的 HITL **观测占位**路由；人工确认结果只记入状态与 metrics，不改写证据、不驱动降级。
+- 支持证据语义冲突触发真实 HITL：单次最多提交一个冲突，人工可选择证据 A、证据 B、保留双方并披露或忽略冲突；决策写入状态并用于报告冲突上下文，但不改写证据正文。
 - 支持检索预算、报告 Review 修正预算、安全修正预算三套独立控制。
 - 支持最终后台静默保存运行产物，包括报告、指标和实际运行图；当前静态编排图由脚本保存 PNG。
 - 核心 Prompt 使用 YAML 管理并记录版本与 schema 契约。
@@ -53,7 +53,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 | 项目作者 | 输入任意可检索研究问题 | 生成可追溯研究报告和运行指标 |
 | 项目作者 | 运行示例或演示样例 | 可以展示 Graph 编排、降级、安全、评估设计 |
 | 面试官 | 询问项目如何避免幻觉 | 可以说明最低证据标准、证据评分、Review 和降级机制 |
-| 面试官 | 询问 Agent 安全 | 可以说明 Input Guard 危险行为审查、Tool 不可信边界、权限分级和 Safety Review；HITL 明确为观测占位 |
+| 面试官 | 询问 Agent 安全 | 可以说明 Input Guard 危险行为审查、Tool 不可信边界、权限分级和 Safety Review；Web HITL 明确为观测占位，冲突 HITL 不构成安全闭环 |
 
 ## 3. 核心行为与边界
 
@@ -97,8 +97,8 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 | `web_search_hitl_request` | `web_hitl_required`、`web_search_results` | `web_hitl_decisions`、`web_hitl_required` | **观测占位**：仅服务 Playwright 触发的登录/验证码/权限墙；只对 `requires_login=true` 的结果调用 DevTools 观察；记录 `completed=false`，不真正暂停，不因未完成而降级或阻断后续证据治理 |
 | `web_search_result_ready` | 无业务字段 | `executed_nodes` | Web 分支汇聚节点；无 HITL 时直接进入，有 HITL 观测后进入，再与本地检索分支汇聚 |
 | `sanitize_and_cluster` | `web_search_results`、`local_document_results` | `evidence_clusters`、可选 `discarded_candidate_count`，并清空两类上游结果 | 标记 `untrusted_tool_output`、按规范化 URL 去重、按 `question_id` 聚类；丢弃不可准入候选（见证据准入契约）；不再写入 `sanitized_results` |
-| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions`，并清空 `evidence_clusters` | 整表替换本轮 `evidence_items`/`conflicts`；按来源分桶计算 `reliability_score`；长文写入 `outputs/evidence/{evidence_id}.txt`；仅当同题证据命中极简语义冲突规则时建 `ConflictItem`；`hitl_triggered` 仅决定是否走冲突 HITL **观测**节点 |
-| `request_human_review` | `conflicts`、`hitl_required` | `hitl_decisions` | **观测占位**：不真正暂停；只记录冲突观测事实，不改写证据正文，不触发降级 |
+| `evaluate_evidence_quality` | `evidence_clusters`、`sub_questions` | `evidence_items`、`conflicts`、`entity_index`、`hitl_required`、重置后的 `hitl_decisions`，并清空 `evidence_clusters` | 整表替换本轮 `evidence_items`/`conflicts`；按来源分桶计算 `reliability_score`；长文写入 `outputs/evidence/{evidence_id}.txt`；仅当同题证据命中极简语义冲突规则时建 `ConflictItem`；`hitl_triggered` 决定是否进入真实冲突 HITL |
+| `request_human_review` | `conflicts`、`evidence_items`、`hitl_required` | `conflicts`、`hitl_decisions`、`hitl_required` | 对排序后的首个已触发冲突调用 `interrupt`；恢复值只接受 `prefer_evidence_a` / `prefer_evidence_b` / `keep_both_and_disclose` / `ignore_conflict`，并校验 `conflict_id`；完成后记录决策并清除 `hitl_required`。节点不改写证据正文；运行方必须提供 checkpointer 与稳定 `thread_id` 后以 `Command(resume=...)` 恢复 |
 | `build_evidence_matrix` | `evidence_items`、`sub_questions`、`entity_index` | `evidence_matrix` | `evidence_matrix` 只存 `question_id`、证据 ID 列表与少量聚合字段；**不**在此把矩阵收录标为 `used_in_final_report` |
 | `check_evidence_sufficiency` | `sub_questions`、`minimum_evidence_standard`、`evidence_matrix` | `evidence_sufficiency_result`、`degradation_reason` | 充足性只写入 `evidence_sufficiency_result`；`sufficient` / 分项状态 / `insufficient_question_ids` 均由此结构读取，不再另写顶层镜像字段 |
 | `check_step_budget` | `search_steps`、`max_search_steps`、`evidence_sufficiency_result` | `step_budget_exhausted`、`step_budget_reason`、`degradation_reason` | 只判断检索预算，不负责降级 |
@@ -149,7 +149,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 - **对立极性**：预置中英对立词对；同题两条分别命中对立两侧则建 `ConflictItem`。
 - **同锚点数字矛盾**：同一邻近关键词窗口内数值相对差异 ≥ 20% 且绝对差有意义，并且两条文本具有共同实体标记时才建 `ConflictItem`；若任一文本出现年份、日期或“周末/工作日”等时间范围，两条还必须共享相同时间范围，避免跨实体、跨时期数字误报。
 - `preferred_evidence_id` 取冲突组内 `reliability_score` 最高者；语义冲突的 `hitl_need_score` 固定为 `6.0`，是否 `hitl_triggered` 仍与 `HITL_CONFLICT_THRESHOLD` 比较。
-- 多源并存但未命中上述信号时**不**建冲突；`hitl_triggered` 仅用于是否进入冲突 HITL 观测节点，不代表人工已裁决。
+- 多源并存但未命中上述信号时**不**建冲突；`hitl_triggered` 仅用于是否进入冲突 HITL，不代表人工已裁决；只有 `reviewed_by_human=true` 且存在完成决策才表示已恢复并裁决。
 
 ### 关键状态与边界
 
@@ -177,7 +177,7 @@ Web / 冲突 HITL 当前仅为观测占位（不暂停、不因未完成而降�
 - `degraded = true` 的报告由质量 Review 直接放行，继续执行 Safety Review。
 - `review_research_report` 负责研究质量中的**写法与可核验性**，不负责安全审查，也不负责证据充足性；评价须锚定用户最初 `user_query`（是否答到问题、有无偏题/漏答、引用与边界是否成立），不以空泛文笔点评替代，不得因「证据数量/来源不够」单独 fail（充足性已由上游判定）；`revision_suggestions` 只能是同证据可执行的改写指引；不通过且预算未耗尽时，下一次生成必须消费这些建议。
 - `safety_review` 负责安全边界，不负责研究质量评分；安全不通过再生成时，报告 Prompt 须附带风险与保守改写约束。
-- Web HITL 与冲突 HITL 均为观测占位：写入决策/观察记录与 metrics，不构成安全闭环，当前版本忽略未完成 HITL，不因此降级。
+- Web HITL 仍为观测占位，写入观察记录与 metrics，不构成安全闭环，当前版本忽略未完成 Web HITL，不因此降级。冲突 HITL 会暂停并等待恢复，但只影响证据冲突处理，同样不构成安全闭环。
 - 后台实际运行链路 PNG 由 `persist_outputs` 作为产物逻辑静默保存，不新增主 Graph 编排节点；图以 `edges.py` 主拓扑为骨架，叠加本次 `executed_nodes` 推断已走边，需区分并行、汇聚、循环与未执行路径；不保存 `.mmd` 文件。
 
 ### 预算控制
@@ -267,7 +267,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `MinimumEvidenceStandard` | `question_id`、`min_total_evidence`、`min_high_quality_sources`、`must_include_source_types`、`allow_degraded_answer` | `question_id` 必须存在于 `sub_questions` |
 | `SearchTask` | `task_id`、`question_id`、`query`、`source_type`、`search_provider`、`attempt` | `question_id` 必须存在于 `sub_questions`；规划侧本地任务 `source_type` 为伞类型 `local`，`search_provider` 为 `local_document_search`；初始与迭代规划输出的 `search_tasks` 均不得为空 |
 | `EvidenceItem` | 身份与来源字段、短 `snippet`、可选 `content_path`（指向 `outputs/evidence/{evidence_id}.txt`）、四维分（`relevance_score` / `answer_coverage_score` / `source_confidence_score` / `freshness_score`）、`reliability_score`、可选 `score_bucket` / `scored_by` / `library_id`、`score_reason`、`used_in_final_report` | `evidence_id` 唯一；`question_id` 必须存在于 `sub_questions`；长文不进 State；`reliability_score` 计算时权威权重取自 `source_type` 表，`source_confidence_score` 来自工具；不持久化 `authority_score` |
-| `ConflictItem` | `conflict_id`、`question_id`、`evidence_ids`、`conflict_summary`、`preferred_evidence_id`、`hitl_need_score`、`hitl_triggered` | `evidence_ids` 必须存在于 `evidence_items` |
+| `ConflictItem` | `conflict_id`、`question_id`、`evidence_ids`、`conflict_summary`、`preferred_evidence_id`、`hitl_need_score`、`hitl_triggered`，可选人工解决方式、理由与已人工复核标记 | `evidence_ids` 必须存在于 `evidence_items`；人工选择 A/B 时更新 `preferred_evidence_id`，保留双方时清空该字段，忽略冲突时保留自动偏好 |
 | `QuestionEvidenceStatus` | 问题与 Priority、证据数量、来源覆盖、最低标准、加权分和缺口原因 | `priority_weight` 参与整体加权评分 |
 | `EvidenceSufficiencyResult` | `sufficient`、`overall_score`、`threshold`、`high_priority_all_met`、`question_status`、缺口与降级字段 | `question_status` 的 key 必须存在于 `sub_questions` |
 | `StateEntityIndex` | 问题 ID、按问题关联的证据/冲突/任务 ID、最终使用证据 ID | 只保存 ID，不复制业务正文 |
@@ -460,5 +460,5 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 | `REQ-002` | 5. 数据模型 | `src/schemas/state.py`、`src/llm/structured_outputs.py` | `test_state_reducers.py`、`test_graph_input_schema.py`、`test_evidence_quality_scores.py`、`test_evidence_conflict.py` | demo 级完成 |
 | `REQ-003` | 5–6. Prompt 与模型 | `prompts/*.yml`、`src/llm/prompt_loader.py`、`src/config/settings.py` | `test_plan_research.py`、`test_workflow_config.py`、`test_structured_local_search.py`、`test_research_report_nodes.py` | demo 级完成 |
 | `REQ-004` | 7. 数据与存储 | `src/workflow/artifact_nodes.py`、`outputs/` | `test_artifact_nodes.py` | demo 级完成：实际运行图已还原 fan-out/fan-in 与未执行路径 |
-| `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：HITL 为观测占位（非安全闭环），权限无统一注册表；真实 interrupt HITL 后续补齐 |
+| `REQ-005` | 8. 安全 | `guard_nodes.py`、`search_nodes.py`、`external_agent_workers.py` | `test_web_hitl_devtools.py`、`test_external_agent_workers.py`、`test_strategy_external_worker.py` | 部分完成：Web HITL 为观测占位，冲突 HITL 已使用 interrupt，但二者均非安全闭环；权限无统一注册表 |
 | `REQ-006` | 9. 可观察性 | `artifact_nodes.py`、`src/evaluators/`、`src/dataset/`、`examples/evaluation_cases.jsonl` | `test_*_evaluator.py`、`test_research_report_pairwise.py`、`test_create_langsmith_datasets.py` | 部分完成：Web evaluator 与 20 条固定评测输入已就绪；延迟与 Token 用量在 LangSmith UI 查看，Trace metadata 与量化结果仍为后续 |

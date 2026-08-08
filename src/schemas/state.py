@@ -114,6 +114,16 @@ class ConflictItem(TypedDict):
     preferred_evidence_id: str | None
     hitl_need_score: float
     hitl_triggered: bool
+    resolution: NotRequired[
+        Literal[
+            "prefer_evidence_a",
+            "prefer_evidence_b",
+            "keep_both_and_disclose",
+            "ignore_conflict",
+        ]
+    ]
+    reviewed_by_human: NotRequired[bool]
+    resolution_reason: NotRequired[str | None]
 
 
 class QuestionEvidenceStatus(TypedDict):
