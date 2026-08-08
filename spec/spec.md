@@ -323,6 +323,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - 静态编排图 PNG：`outputs/runs/researchops_graph.png`
 - 一致性与原子性：写入产物时必须使用 `run_id` 或时间戳避免覆盖已有文件。
 - 结构化 mock 数据库在首次查询时执行 `CREATE TABLE IF NOT EXISTS`，并从 JSON 种子执行 `INSERT OR IGNORE`。
+- 结构化 mock 查询结果以 `mock://ai_products/<row_id>` 作为逐记录唯一地址，防止不同记录在证据清洗阶段被按来源地址误去重；`星云笔记` 对立记录与 `data/mock/hitl_conflict_docs/` 仅作为冲突 HITL 演示夹具，不代表真实产品事实。
 - 生命周期：`outputs/` 为生成文件目录，可被清理；清理前需确认没有用户手动保留内容。
 - 敏感数据：不得把 API Key、token、私钥、完整 `.env`、系统 Prompt 或用户隐私写入报告、图、指标或 LangSmith metadata。
 

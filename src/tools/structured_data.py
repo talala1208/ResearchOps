@@ -224,7 +224,8 @@ def query_structured_products_for_task(task: dict[str, Any]) -> list[dict[str, A
                 "question_id": task["question_id"],
                 "source_type": task["source_type"],
                 "source_name": row["source_name"],
-                "url_or_path": str(DB_PATH),
+                # 每条产品使用唯一路径，避免 sanitize 按 url 去重后只剩 1 条
+                "url_or_path": f"mock://ai_products/{row['id']}",
                 "title": f"结构化产品数据：{row['name']}",
                 "snippet": snippet,
                 "published_at": None,

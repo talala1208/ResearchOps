@@ -64,6 +64,25 @@ class StructuredLocalSearchTest(unittest.TestCase):
         )
         self.assertIn("分词兜底", results[0]["structured_payload"]["search_reasoning"])
 
+    def test_multiple_rows_have_unique_mock_paths(self) -> None:
+        """多条结构化记录必须保留独立地址，避免证据清洗误去重。"""
+
+        task = {
+            "task_id": "T_hitl",
+            "question_id": "Q1",
+            "query": "星云笔记 SSO",
+            "source_type": "structured_mock",
+            "search_provider": "local_document_search",
+            "attempt": 1,
+        }
+
+        results = structured_data.query_structured_products_for_task(task)
+
+        self.assertGreaterEqual(len(results), 2)
+        paths = [result["url_or_path"] for result in results]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertTrue(all(path.startswith("mock://ai_products/") for path in paths))
+
 
 if __name__ == "__main__":
     unittest.main()
