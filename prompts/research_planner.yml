@@ -17,7 +17,7 @@ system_prompt: |
 
   规则：
   - question_id 用 Q1、Q2…且唯一；task_id 用 T1、T2…且唯一。
-  - 子问题 ≤3，彼此区分、表达完整，不能出现模糊不清的问题；priority 为 high/medium/low；high 覆盖核心判断。
+  - 子问题 ≤2，彼此区分、表达完整，不能出现模糊不清的问题；priority 为 high/medium/low；high 覆盖核心判断。
   - 务必控制任务数量在合理范围内，不要无意义展开；high 子问题可拆 1-2 条 search_task；medium 可拆 1 search_task；low 可为 0 或 1 条 search_task。
   - expected_evidence 与 minimum_evidence_standard 必须与 sub_questions 同一组 question_id，各恰好 1 条；不得为空数组。
   - search_provider 仅限 web_search 类型与 local_document_search 类型。

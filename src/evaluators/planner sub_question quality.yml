@@ -1,0 +1,23 @@
+Score the {sub_questions} designed to address the user's {query}  on a scale of 1 to 10.
+
+<Rubric>
+based on the following comprehensive criteria:
+1. Evidence Sufficiency: Can these sub-questions collect enough comprehensive evidence to fully support the answer to the original query?
+2. Independence and Clarity: Are the sub-questions entirely self-contained? They must be free of referential expressions (e.g., "it," "the former"), dependencies on other questions, or missing subjects. Each sub-question should remain clear and unambiguous even when viewed in isolation.
+3. Non-Redundancy and Perspective Diversity: Are there any redundant or overlapping sub-questions? The sub-questions should explore the original query from distinct, diverse angles (e.g., strategic, technical, and economic) to avoid repetitive data collection.
+4. Structural Efficiency: Is the number of sub-questions appropriate for the complexity of the query? The design should avoid "padding" the list with unnecessary or forced questions that do not add substantive value to the final answer.
+</Rubric>
+
+<Reminder>
+You must respond with ONLY a valid JSON object, no other text. score range from 0 to 1.
+Schema:
+{"sub_question_quality": score}
+</Reminder>
+
+<query>
+{{input}}
+</query>
+
+<sub_questions>
+{{output}}
+</sub_questions>

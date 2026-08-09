@@ -12,11 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from src.evaluators.external_agent_worker_stability import (  # noqa: E402
-    external_agent_worker_stability_evaluator,
-)
 from src.evaluators.researchops_summary import researchops_summary_evaluator  # noqa: E402
-from src.evaluators.web_tool_stability import web_tool_stability_evaluator  # noqa: E402
 from src.workflow.graph import graph  # noqa: E402
 
 
@@ -27,15 +23,14 @@ def target_function(inputs: dict) -> dict:
 
 
 def main() -> None:
-    """使用 Web / 外部 Worker 稳定性 evaluator 运行 LangSmith 实验。"""
+    """LangSmith 实验。"""
 
     evaluate(
         target_function,
         data="ResearchOps Agent",
-        evaluators=[
-            web_tool_stability_evaluator,
-            external_agent_worker_stability_evaluator,
-        ],
+        # evaluators=[
+        #     web_tool_stability_evaluator,
+        # ],
         summary_evaluators=[researchops_summary_evaluator],
     )
 
