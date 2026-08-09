@@ -175,7 +175,7 @@ uv run python scripts/export_graph_mermaid.py
 - 为什么证据充足性判断和报告质量 Review 必须分离。
 - 为什么检索、Review、安全修正使用三套独立预算。
 - 为什么工具输出统一视为不可信资料。
-- 为什么当前 HITL 仅是观测占位，不能宣称已经实现可恢复的人机接管。
+- 为什么 Web HITL 仅是观测占位，而证据冲突 HITL 通过 `interrupt + resume` 实现可恢复的人机裁决。
 
 ## 输出与安全边界
 
@@ -202,10 +202,11 @@ spec/spec.md    当前需求与行为的唯一事实来源
 
 ## 当前限制
 
-- Web 与冲突 HITL 当前只记录观测结果，不会真正暂停和恢复 Graph。
+- Web HITL 只记录登录墙、验证码和权限墙的观测结果，不会暂停或恢复 Graph。
+- 证据冲突 HITL 会通过 LangGraph `interrupt + resume` 暂停和恢复 Graph；运行方需要提供 checkpointer 和稳定 `thread_id`，且该能力不构成安全闭环。
 - 本地 RAG 只读取预构建向量库，不负责生产级索引生命周期。
 - 延迟与 Token 用量统一在 LangSmith UI 中查看，不在 SDK 产物指标中重复记录。
-- 默认离线套件仍需处理历史 dataset 模块与 evaluator 契约问题后才能作为 CI 绿灯基线。
+- 默认离线测试基线为 145 项；真实 LLM smoke 与联网评估仍需手动运行。
 
 ## 开发约束
 

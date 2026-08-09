@@ -409,8 +409,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 - Evaluator：
   - `researchops_summary_evaluator`：规则型实验级汇总，统计报告、持久化、证据、Review、安全、降级和 HITL 观测指标；证据、Review、安全和降级指标只统计实际包含对应业务字段的 runs。
   - `research_report_pairwise_preference`：LLM-as-Judge Pairwise A/B，从回答问题、证据支撑、覆盖、限制披露、引用、结构和安全七个维度比较报告。
-  - `web_tool_stability_evaluator`：规则型 Web 工具稳定性评分；Web Search SubAgent 在原始工具输出产生后通过确定性逻辑提取 `web_tool_evaluation_records`，保留工具名、成功状态、有效结果数、正文长度、失败类型、截断错误，以及 Playwright 实际候选写入信号 `body_appended` / `body_chars`，并以列表累加 reducer 保留各轮紧凑记录；Playwright 写入成功次数必须直接统计 `body_appended=true`，不得用 `valid_result_count` 代理；evaluator 按本次实际调用的 SerpAPI、Tavily、Context7 和 Playwright 工具归一化评分，没有 Web 工具调用的 run 标记为 `not_applicable`（输入已由主 Graph State 接线）。
-  - `external_agent_worker_stability_evaluator`：规则型外部 worker 稳定性评分，读取迭代上下文中的 worker 结果；没有触发外部 worker 的 run 标记为 `not_applicable`。
+  - `evidence_utilization_rate`：规则型引用利用率统计，计算报告中实际引用的合法 `evidence_id` 占可用证据 ID 的比例。
+  - `is_degraded`：规则型降级状态统计，读取运行输出或 metrics 中的 `degraded` 字段。
+  - `source_citation_count`：按来源统计最终报告已引用和可用证据的数量。
+  - `source_dispatch_valid_count`：按来源统计 Web 工具调用、有效搜索结果和形成的证据数量，并统计 Playwright 正文实际写入次数。
 - LangSmith dataset：`researchops-input-guard-v1`、`researchops-standard-research-v1`、`researchops-url-web-search-v1`、`researchops-local-and-structured-v1`、`researchops-edge-cases-v1`。
 - `src/dataset` 提供 dataset 创建、样例追加、split 管理和 Pairwise A/B 运行脚本；均为手动入口，不进入主 Graph。
 - `examples/evaluation_cases.jsonl` 固定 20 条跨版本评测样例；每条包含稳定 `case_id`、`scene`、唯一 Graph 输入 `user_query`、`expected_outcome`、引用要求、所需能力和人工复核说明。该文件只定义评测输入与预期类型，不预填实测指标。

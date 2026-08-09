@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +65,7 @@ def ensure_mock_database() -> Path:
     """确保 mock SQLite 数据库存在并完成基础数据初始化。"""
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_products (
@@ -151,7 +152,7 @@ def search_ai_products_by_terms(
     """
     params.append(normalized_limit)
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
 
