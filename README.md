@@ -14,13 +14,9 @@ Graph 入口：`src.workflow.graph.graph`。
 
 ![researchops_graph](docs/assets/graph/researchops_graph.png)
 
-标准研究路径（实线为本次执行，虚线为未走分支）：
+实际运行路径样例（标准输入及危险降级）：
 
-![sample_executed_topology](docs/assets/graph/sample_executed_topology.png)
-
-危险输入在 `input_guard` 后直达降级，跳过检索链：
-
-![executed_degraded_input_guard](docs/assets/graph/executed_degraded_input_guard.png)
+![executed_degraded_input_guard](docs/assets/graph/sampel_executed_graph.png)
 
 ## 设计亮点（摘要）
 
