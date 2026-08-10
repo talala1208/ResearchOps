@@ -11,21 +11,23 @@ template/
 # 参考文件
 reference/
 
-# 文件等
+# 运行产物
 outputs/
-# data/
+
+# 规格（不公开）
+spec/
+
+# 本地向量库与结构化 mock（需自行接入，不入库）
+data/mock/
+data/resources/
 
 # LangGraph dev 本地运行状态
 .langgraph_api/
 
-# 缓存文件等
+# 缓存与系统文件
 .playwright-mcp/
 __pycache__/
 .cursor
 .pytest_cache
-
-# 测试
-tests/
-
-# 规格稳定
-spec/
+.DS_Store
+**/.DS_Store
