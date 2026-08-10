@@ -23,3 +23,9 @@ outputs/
 __pycache__/
 .cursor
 .pytest_cache
+
+# 测试
+tests/
+
+# 规格稳定
+spec/

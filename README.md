@@ -1,74 +1,47 @@
 # ResearchOps Agent
 
-ResearchOps Agent 是一个基于 LangGraph 的证据驱动研究工作流。它把研究问题拆成子问题，通过 Web 与本地数据源并行检索，执行证据准入、质量评分、冲突识别、充足性检查、报告 Review 和安全审查，最终生成带可追溯引用的 Markdown 报告与运行指标。
+**基于 [LangGraph](https://github.com/langchain-ai/langgraph) 的证据驱动研究 Agent：把研究问题拆成子问题，并行检索 Web 与本地资料，完成证据准入、质量评分、冲突识别、充足性检查、报告 Review 与安全审查，最终产出带可追溯引用的 Markdown 报告。**
 
-项目重点不是“再封装一次搜索 + LLM”，而是展示以下 Agent 工程能力：
+项目侧重展示 Agent 工程能力，而不是简单的「搜索 + LLM」封装：
 
-- 有状态 Graph：并行分支、汇聚、条件路由、预算循环和降级路径。
-- 证据治理：稳定 ID、准入过滤、质量评分、冲突识别和引用回溯。
-- 质量闭环：报告生成、质量 Review、安全 Review 使用独立修正预算。
-- 多源检索：Web、本地 Markdown、本地向量 RAG 和结构化 mock 数据。
-- 可观察性：LangSmith Trace、运行 metrics、静态 Graph 和实际执行链路图。
-
-当前需求、行为边界与验收标准以 [`spec/spec.md`](spec/spec.md) 为唯一事实来源。
+- **有状态 Graph**：并行分支、汇聚、条件路由、预算循环与降级路径
+- **证据治理**：稳定证据 ID、准入过滤、质量评分、冲突识别与引用回溯
+- **质量闭环**：报告生成、质量 Review、安全 Review 使用独立修正预算
+- **多源检索**：Web、本地 Markdown、本地向量 RAG、结构化 mock 数据
+- **可观察与可评估**：LangSmith Trace / Dataset / Experiment，配合证据利用率、降级、引用与工具分发等自定义指标
 
 ## 工作流
 
-```mermaid
-flowchart TD
-    A[用户问题] --> B[input_guard]
-    B -->|通过| C[plan_research]
-    B -->|阻断| M[prepare_degraded_report]
-    C --> D[web_search_sub_agent]
-    C --> E[local_document_search_tool]
-    D --> F[web_search_result_ready]
-    E --> G[sanitize_and_cluster]
-    F --> G
-    G --> H[evaluate_evidence_quality]
-    H --> I[build_evidence_matrix]
-    I --> J[check_evidence_sufficiency]
-    J -->|不足| K[check_step_budget]
-    K -->|有预算| L[strategy_iteration]
-    L --> C
-    K -->|预算耗尽| M
-    J -->|充足| N[generate_research_report]
-    M --> N
-    N --> O[review_research_report]
-    O -->|需要修正且有预算| N
-    O --> P[safety_review]
-    P -->|需要安全修正且有预算| M
-    P --> Q[persist_outputs]
-```
+可执行 Graph 入口：`src.workflow.graph.graph`。行为契约见 `[spec/spec.md](spec/spec.md)`。
 
-完整节点契约见 [`spec/spec.md`](spec/spec.md)，可执行 Graph 的唯一入口是 `src.workflow.graph.graph`。
+### Graph 设计图
 
-## 环境要求
+静态编排图（`scripts/export_graph_mermaid.py` 导出），包含并行检索、策略迭代回环、报告 Review / 安全修正，以及两条 HITL 分支：
 
-- macOS 或 Linux
-- Python 3.11–3.13
-- [uv](https://docs.astral.sh/uv/)
-- 至少一个可用的 DashScope/OpenAI 兼容模型 API Key
-- 真实 Web 研究需要 SerpAPI 或 you.com Search；Tavily、Context7 与 Playwright 为按任务启用的补充来源
+researchops_graph
 
-真实 smoke 会访问模型和网络服务，可能产生费用。默认离线测试不应访问真实网络。
+### 实际执行拓扑
 
-## 快速开始
+每次真实运行会保存 `outputs/runs/<run_id>_executed.png`：实线为本次走过的路径，虚线为未执行分支；并行检索区域标注 fan-out / fan-in。
 
-### 1. 安装依赖
+**标准研究路径**：Web 与本地并行检索后进入证据治理与报告闭环；策略迭代、冲突 HITL、Web HITL 在本趟未触发：
+
+sample_executed_topology
+
+**危险输入降级路径**：`input_guard` 拦截后直达 `prepare_degraded_report`，跳过检索与证据链：
+
+executed_degraded_input_guard
+
+## 安装
+
+环境要求：macOS / Linux，Python 3.11–3.13，[uv](https://docs.astral.sh/uv/)，以及可用的 DashScope / OpenAI 兼容模型密钥。真实 Web 研究需要 SerpAPI 或 you.com Search。
 
 ```bash
 uv sync
-```
-
-项目使用现有 `uv` 环境，不需要另建虚拟环境。
-
-### 2. 创建本地配置
-
-```bash
 cp .env.example .env
 ```
 
-最小配置：
+最小配置示例：
 
 ```dotenv
 DASHSCOPE_API_KEY=你的模型密钥
@@ -77,26 +50,31 @@ DASHSCOPE_MODEL=qwen3.7-plus
 
 WEB_SEARCH_PROVIDER=serp
 SERPAPI_API_KEY=你的搜索密钥
+
+# LangSmith 观测（可选，但推荐开启）
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=你的 LangSmith 密钥
+LANGSMITH_PROJECT=research-agent
 ```
 
-如果使用 you.com Search，将 `WEB_SEARCH_PROVIDER` 改为 `ydc` 并配置 `YDC_API_KEY`。不要提交 `.env`，也不要把密钥写入报告、截图或 Trace metadata。
+使用 you.com Search 时，将 `WEB_SEARCH_PROVIDER` 改为 `ydc` 并配置 `YDC_API_KEY`。不要提交 `.env`。
 
-本地能力是可选扩展：
+可选本地能力：
 
-- `LOCAL_DOCUMENTS_BASE_PATH`：受限只读的 Markdown 根目录。
-- `LOCAL_RAG_PERSIST_PATH`：预构建 parquet 向量库，默认 `data/resources/union.parquet`。
-- `data/mock/ai_products.json`：结构化 mock 数据种子。
+- `LOCAL_DOCUMENTS_BASE_PATH`：受限只读 Markdown 根目录
+- `LOCAL_RAG_PERSIST_PATH`：预构建 parquet 向量库（默认 `data/resources/union.parquet`）
+- `data/mock/ai_products.json`：结构化 mock 数据
 
-未准备本地数据时，建议先使用只需要公开 Web 证据的问题。
+## 使用
 
-### 3. 运行真实端到端 smoke
+### 端到端运行
 
 ```bash
 uv run python scripts/run_smoke.py \
   "比较 LangSmith、AgentOps 与 Arize Phoenix 在 Agent 观测和评估方面的定位差异"
 ```
 
-不传问题时会使用脚本内置示例。检索、Review 与安全修正预算由 `.env` 中的 `MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS` 控制。
+检索、Review 与安全修正预算由 `.env` 中的 `MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS` 控制。
 
 运行结束后查看：
 
@@ -106,11 +84,9 @@ outputs/runs/<run_id>_metrics.json
 outputs/runs/<run_id>_executed.png
 ```
 
-`*_executed.png` 按主图拓扑渲染：实线为本次走过的路径，虚线为未执行路径；并行检索区域标出 fan-out / fan-in，策略迭代与 Review/Safety 回环标为循环。
+报告样例：`[examples/sample_report.md](examples/sample_report.md)`。
 
-仓库提供一份脱离本地运行目录也可查看的真实报告样例：[`examples/sample_report.md`](examples/sample_report.md)。
-
-### 4. 在 LangGraph Studio 中观察
+### LangGraph Studio
 
 ```bash
 ./scripts/run_langgraph_dev.sh
@@ -126,91 +102,53 @@ Studio 输入只接受：
 
 预算与阈值只从环境变量读取，不能通过 Studio 输入覆盖。
 
-## 离线验证
+## LangSmith 监测与优化
 
-运行现有离线测试：
+ResearchOps 把运行链路接到 LangSmith，用来做 Trace 复盘、Dataset 回归评测和指标驱动优化。正式评测样例覆盖五类场景：常规公开资料研究、指定 URL 研究、本地与 Web 结合、复杂多对象比较、危险输入直接降级。
 
-```bash
-uv run python -m unittest discover -s tests -q
-```
+评测关注的自定义指标包括：
 
-导出静态 Graph：
 
-```bash
-uv run python scripts/export_graph_mermaid.py
-```
+| 指标                            | 作用                   |
+| ----------------------------- | -------------------- |
+| `evidence_utilization_rate`   | 报告是否真正消费了检索到的证据      |
+| `is_degraded`                 | 是否进入降级路径（危险输入、证据不足等） |
+| `source_citation_count`       | 最终报告对各来源的引用分布        |
+| `source_dispatch_valid_count` | Web / 本地工具分发与有效结果情况  |
+| Latency / Token Usage         | 时延与成本，用于定位瓶颈与优化预算    |
 
-静态图会写入 `outputs/runs/researchops_graph.png`。默认测试与静态图导出不应调用真实搜索服务；真实 LLM smoke 与联网评估应手动运行。
 
-## 固定评测样例
+样例与 Dataset 维护入口：`src/dataset/append_questions_to_dataset.py`。Evaluator 实现位于 `src/evaluators/`。
 
-[`examples/evaluation_cases.jsonl`](examples/evaluation_cases.jsonl) 提供 20 条固定样例，用于后续重复运行与跨版本比较。样例覆盖：
+### 正式样例实验截图
 
-- 标准公开资料研究
-- 指定 URL 研究
-- 本地文档、RAG 与结构化数据
-- 证据不足和冲突场景
-- 越权、密钥泄露和绕过权限等 Input Guard 场景
+**常规公开资料研究**（`formal_general_research`）
 
-每行字段：
+formal_general_research
 
-- `case_id`：稳定样例 ID。
-- `scene`：场景分组。
-- `user_query`：传给 Graph 的唯一输入。
-- `expected_outcome`：预期为普通报告或降级报告。
-- `requires_citations`：正常报告是否应包含合法证据引用。
-- `required_capabilities`：运行该样例依赖的能力。
-- `notes`：人工复核重点，不是模型输入。
+**指定 URL 研究**（`formal_url_research`）
 
-当前文件只固定评测输入与预期类型，不包含成功率、降级率、延迟、Token 或引用有效率的实测结果。
+formal_url_research
 
-## 建议演示路径
+**本地资料 + Web 结合**（`formal_local_web_research`）
 
-1. 标准研究：比较三个 Agent 观测平台，展示并行检索、证据评分和引用附录。
-2. 证据不足：研究虚构产品，展示预算耗尽后主动降级而不是编造来源。
-3. 危险输入：要求输出系统 Prompt 或密钥，展示 Input Guard、降级报告和安全审查。
+formal_local_web_research
 
-面试时可重点解释：
+**复杂多对象比较**（`formal_complex_research`）
 
-- 为什么证据充足性判断和报告质量 Review 必须分离。
-- 为什么检索、Review、安全修正使用三套独立预算。
-- 为什么工具输出统一视为不可信资料。
-- 为什么 Web HITL 仅是观测占位，而证据冲突 HITL 通过 `interrupt + resume` 实现可恢复的人机裁决。
+formal_complex_research
 
-## 输出与安全边界
+**危险输入直接降级**（`formal_dangerous_direct_degradation`）
 
-项目只开放只读网络、本地受限读取和 `outputs/` 下的新产物写入，不允许外部写入、绕过登录墙/验证码或无约束代码执行。
+危险请求在 Input Guard 阶段被拦截，`is_degraded=1.0`，不进入正常检索与引用路径：
 
-报告中的 `[Exx]` 必须对应运行状态中的合法 `evidence_id`。定稿阶段由代码追加引用证据附录；证据不足时必须披露限制或生成降级报告。
+formal_dangerous_direct_degradation
 
-## 项目结构
+### 如何用这些指标做优化
 
-```text
-src/workflow/   Graph、路由和节点实现
-src/schemas/    State 与业务数据模型
-src/tools/      Web、本地文档、RAG、结构化数据与可选外部 worker
-src/llm/        模型、Prompt 加载和结构化输出
-src/evaluators/ LangSmith 与本地 evaluator
-src/dataset/    Dataset、split 与 Pairwise A/B 工具
-prompts/        版本化 YAML Prompt
-tests/          默认离线测试
-scripts/        smoke、Studio 与 Graph 导出入口
-examples/       可提交的报告样例与固定评测输入
-outputs/        本地生成产物
-spec/spec.md    当前需求与行为的唯一事实来源
-```
+1. **证据质量**：`evidence_utilization_rate` 偏低时，优先检查证据准入、报告证据供给预算，以及 Review 是否要求了无法落地的补搜。
+2. **工具成本**：从 `source_dispatch_valid_count` 看 Tavily / Playwright / Context7 / 主搜索的调用是否过密，再调 `WEB_SEARCH_`* 与任务并发。
+3. **时延与 Token**：复杂研究与 URL 抓取通常最贵；可下调检索条数、正文截断长度、精选长文条数，或收紧 `MAX_SEARCH_STEPS`。
+4. **安全与降级**：危险样例应稳定落到 `is_degraded=1`；若误伤常规研究，回看 Input Guard Prompt 与阈值。
+5. **回归对比**：同一 Dataset 在 Prompt / 模型 / 预算变更后重跑 Experiment，对比利用率、降级率、延迟和 Token 变化。
 
-## 当前限制
-
-- Web HITL 只记录登录墙、验证码和权限墙的观测结果，不会暂停或恢复 Graph。
-- 证据冲突 HITL 会通过 LangGraph `interrupt + resume` 暂停和恢复 Graph；运行方需要提供 checkpointer 和稳定 `thread_id`，且该能力不构成安全闭环。
-- 本地 RAG 只读取预构建向量库，不负责生产级索引生命周期。
-- 延迟与 Token 用量统一在 LangSmith UI 中查看，不在 SDK 产物指标中重复记录。
-- 默认离线测试基线为 145 项；真实 LLM smoke 与联网评估仍需手动运行。
-
-## 开发约束
-
-- 行为变更先更新或同步更新 `spec/spec.md`。
-- 默认测试禁止真实联网。
-- `reference/` 与 `template/` 不作为运行依赖。
-- 不提交 `.env`、API Key、个人知识库内容和本地运行产物。
