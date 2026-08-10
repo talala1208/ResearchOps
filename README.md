@@ -12,15 +12,15 @@ ResearchOps 把研究流程做成有状态 Graph：拆分子问题 → 多源并
 
 Graph 入口：`src.workflow.graph.graph`。
 
-researchops_graph
+![researchops_graph](docs/assets/graph/researchops_graph.png)
 
 标准研究路径（实线为本次执行，虚线为未走分支）：
 
-sample_executed_topology
+![sample_executed_topology](docs/assets/graph/sample_executed_topology.png)
 
 危险输入在 `input_guard` 后直达降级，跳过检索链：
 
-executed_degraded_input_guard
+![executed_degraded_input_guard](docs/assets/graph/executed_degraded_input_guard.png)
 
 ## 设计亮点（摘要）
 
@@ -51,25 +51,25 @@ executed_degraded_input_guard
 
 **常规公开资料研究**（`formal_general_research`）
 
-formal_general_research
+![formal_general_research](docs/assets/langsmith/formal_general_research.png)
 
 **指定 URL 研究**（`formal_url_research`）
 
-formal_url_research
+![formal_url_research](docs/assets/langsmith/formal_url_research.png)
 
 **本地资料 + Web 结合**（`formal_local_web_research`）
 
-formal_local_web_research
+![formal_local_web_research](docs/assets/langsmith/formal_local_web_research.png)
 
 **复杂多对象比较**（`formal_complex_research`）
 
-formal_complex_research
+![formal_complex_research](docs/assets/langsmith/formal_complex_research.png)
 
 **危险输入直接降级**（`formal_dangerous_direct_degradation`）
 
 Input Guard 拦截后 `is_degraded=1.0`，不进入正常检索与引用路径：
 
-formal_dangerous_direct_degradation
+![formal_dangerous_direct_degradation](docs/assets/langsmith/formal_dangerous_direct_degradation.png)
 
 ## 快速开始
 
