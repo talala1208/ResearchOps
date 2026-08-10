@@ -458,6 +458,70 @@ class CitedEvidenceAppendixTest(unittest.TestCase):
         once = report_nodes.append_cited_evidence_appendix(final, state)
         self.assertEqual(once.count("## 引用证据"), 1)
 
+    def test_appendix_puts_local_rag_under_local_with_source_name(self) -> None:
+        """local_rag 归入 Local，格式为 local_rag: name | [title](url)。"""
+
+        state = _base_state(
+            evidence_items={
+                "E5": {
+                    "evidence_id": "E5",
+                    "question_id": "Q1",
+                    "source_type": "local_rag",
+                    "source_name": "local_langsmith_docs_rag",
+                    "url_or_path": "https://docs.langchain.com/langsmith/evaluation",
+                    "title": "Evaluation concepts",
+                    "snippet": "rag chunk",
+                    "published_at": None,
+                    "collected_by": "local_rag_search",
+                    "freshness_score": 0.5,
+                    "relevance_score": 0.8,
+                    "answer_coverage_score": 0.7,
+                    "source_confidence_score": 0.9,
+                    "reliability_score": 0.85,
+                    "score_reason": None,
+                    "used_in_final_report": True,
+                },
+                "E6": {
+                    "evidence_id": "E6",
+                    "question_id": "Q1",
+                    "source_type": "local_rag",
+                    "source_name": "local_langsmith_docs_rag",
+                    "url_or_path": "local_rag://chunk/2",
+                    "title": "无公网 URL 的 chunk",
+                    "snippet": "chunk",
+                    "published_at": None,
+                    "collected_by": "local_rag_search",
+                    "freshness_score": 0.5,
+                    "relevance_score": 0.6,
+                    "answer_coverage_score": 0.5,
+                    "source_confidence_score": 0.8,
+                    "reliability_score": 0.7,
+                    "score_reason": None,
+                    "used_in_final_report": True,
+                },
+            },
+            entity_index={
+                "question_ids": ["Q1"],
+                "evidence_ids_by_question_id": {"Q1": ["E5", "E6"]},
+                "conflict_ids_by_question_id": {"Q1": []},
+                "search_task_ids_by_question_id": {"Q1": []},
+                "used_evidence_ids": ["E5", "E6"],
+            },
+        )
+
+        appendix = report_nodes.build_cited_evidence_appendix(state)
+        self.assertNotIn("### Web 证据", appendix)
+        self.assertIn("### Local 证据", appendix)
+        self.assertIn(
+            "- [E5] local_rag: local_langsmith_docs_rag | "
+            "[Evaluation concepts](https://docs.langchain.com/langsmith/evaluation)",
+            appendix,
+        )
+        self.assertIn(
+            "- [E6] local_rag: local_langsmith_docs_rag | 无公网 URL 的 chunk",
+            appendix,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

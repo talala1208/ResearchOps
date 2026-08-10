@@ -118,7 +118,7 @@ def get_workflow_config() -> WorkflowConfig:
     )
 
 
-def _uses_native_deepseek_provider(model: str) -> bool:
+def uses_native_deepseek_provider(model: str) -> bool:
     """判断模型是否应走 DeepSeek 官方接口。
 
     注意：DashScope 也提供以 `deepseek` 开头的模型名，例如
@@ -145,7 +145,7 @@ def get_model_config(role: str) -> ModelConfig:
     role_model = _read_optional_env(role_model_env) if role_model_env else None
     model = role_model or _read_required_env("DASHSCOPE_MODEL")
 
-    if _uses_native_deepseek_provider(model):
+    if uses_native_deepseek_provider(model):
         return ModelConfig(
             model=model,
             api_key=_read_required_env("DEEPSEEK_API_KEY"),

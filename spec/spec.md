@@ -105,14 +105,14 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 | `generate_research_report` | `user_query`、`research_goal`、`evidence_matrix`、`evidence_items`、`sub_questions`、`degraded`、`review_result`、可选 `safety_review_result` | `report_draft`、`review_revision_count`、`entity_index.used_evidence_ids`、各证据 `used_in_final_report`、`degraded`、`degradation_reason` | LLM 结构化生成 Markdown；主张须引用合法 `evidence_id`；必须消费上一轮 `revision_suggestions`（若有）；降级/Safety 再入时带保守约束；非法引用 ID 剔除并写入 limitations；证据上下文为**全量短目录 + 按题精选落盘长文**（见报告证据供给） |
 | `review_research_report` | `user_query`、`research_goal`、`report_draft`、`evidence_items` | `review_result` | LLM 结构化质量 Review；锚定 `user_query`，只评**同证据可修正**项：问题对齐、引用可追溯、边界披露与过度推断；不评「证据是否充足 / 来源是否够」（由上游 `check_evidence_sufficiency` 负责）；`revision_suggestions` 须可在现有证据上落实（改结构、补引用、降调、写 limitations），禁止要求补搜；不评估安全边界；`degraded=true` 时直接放行 |
 | `safety_review` | `report_draft`、`review_result`、`safety_revision_count`、`evidence_items`、`entity_index` | `safety_review_result`、`final_report`，并清空 `report_draft` | 规则安全审查；通过后 State 只保留 `final_report` 作为报告正文；安全失败时 `final_report` 必须替换为不含原始危险正文和证据附录的确定性安全说明，修订预算耗尽后也不得持久化危险原文；安全通过时由代码追加引用证据附录 |
-| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `output_artifacts`、`evaluation_metrics` | 静默保存报告 Markdown、metrics JSON 和实际运行链路 PNG；产物路径统一由 `output_artifacts` 返回；`executed` PNG 还原 Web/本地 fan-out 与 fan-in、标注循环边，并以虚线与 `skipped` 样式保留未执行节点/边；不保存 `.mmd` 文件；只写 `outputs/` 下新文件 |
+| `persist_outputs` | `final_report`、`evaluation_metrics` 相关状态、`executed_nodes` | `output_artifacts`、`evaluation_metrics` | 静默保存报告 Markdown、metrics JSON，并尽量保存实际运行链路 PNG；产物路径统一由 `output_artifacts` 返回；`executed` PNG 还原 Web/本地 fan-out 与 fan-in、标注循环边，并以虚线与 `skipped` 样式保留未执行节点/边；不保存 `.mmd` 文件；只写 `outputs/` 下新文件；mermaid.ink 渲染失败时跳过 PNG，不得因此导致节点失败 |
 
 ### 检索工具契约
 
 - Web Search 使用确定性调度和单次 LLM 汇总：
   - `web_search_sub_agent` 对多个 Web `search_tasks` 使用有界线程池并发；默认并发度为 `WEB_SEARCH_TASK_CONCURRENCY=3`，最小为 1；合并结果时保持原任务顺序，任一任务抛错时节点整体失败。
   - 单任务内部仍串行调用工具，顺序不变；工具级限流为 Playwright=1、Tavily=1、Context7=2、SerpAPI=3，避免高成本 MCP / Chrome 会话风暴。
-  - 主搜索由 `WEB_SEARCH_PROVIDER` 切换：`serp`（SerpAPI）或 `ydc`（you.com Search，`YDC_API_KEY`，`https://ydc-index.io/v1/search`）；默认 `serp`。请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）。压缩保留 `title` / `url` / `snippet` / `published_at` 后进入汇总 LLM；LLM 输出四维分，并输出顶层 `needs_page_fetch` / `fetch_url` / `fetch_reason`（是否抓正文由 LLM 主决策：snippet 已够则 false；缺关键数字/条款/长文等则 true，且只选一条 keep 后候选 URL）。主搜索候选的 `source_name` / `score_bucket` / 工具 `provider` 与 `WEB_SEARCH_PROVIDER` 一致（`serp`|`ydc`），由 Prompt 模板变量注入；缺省时由代码按 provider 回填；`scored_by` 为 `{provider}_llm`。代码计算综合分 `score = source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2` 并写入结果，再按 `score` 保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
+  - 主搜索由 `WEB_SEARCH_PROVIDER` 切换：`serp`（SerpAPI）或 `ydc`（you.com Search，`YDC_API_KEY`，`https://ydc-index.io/v1/search`）；默认 `serp`。请求条数由 `WEB_SEARCH_SERPAPI_NUM` 控制（默认 5，限制 1–10）。压缩保留 `title` / `url` / `snippet` / `published_at` 后进入汇总 LLM；LLM 输出四维分，并输出顶层 `needs_page_fetch` / `fetch_url` / `fetch_reason`（是否抓正文由 LLM 主决策：snippet 已够则 false；缺关键数字/条款/长文等则 true，且只选一条 keep 后候选 URL）。主搜索候选的 `source_name` / `score_bucket` / 工具 `provider` 与 `WEB_SEARCH_PROVIDER` 一致（`serp`|`ydc`），由 Prompt 模板变量注入；缺省时由代码按 provider 回填；`scored_by` 为 `{provider}_llm`。汇总 LLM 走 `json_object` + 确定性 coerce：缺 `url`/`url_or_path` 时可按索引/title 从压缩主搜索结果回填；缺四维分或 `score_reason` 时填默认分 `0.5` 与说明；仍无合法 `url_or_path` 的条目丢弃。代码计算综合分 `score = source_confidence_score * 0.35 + freshness_score * 0.15 + relevance_score * 0.3 + answer_coverage_score * 0.2` 并写入结果，再按 `score` 保留 `WEB_SEARCH_SERPAPI_KEEP_TOP_N`（默认 3，限制 1–10）。
   - Tavily / Context7 / Playwright 不经汇总 LLM，物化时做确定性轻量清洗（解包 text blocks、规范空白、截断；Context7 不以整个 raw payload 充当 docs；Playwright 对 accessibility snapshot 做确定性角色过滤：优先截取 `main`/`article` 段，保留 heading/paragraph/text/table 单元格等可读文本，丢弃 navigation/banner/menu/button/textbox 等 chrome 与 `/url:` 行，再截断；非 snapshot 纯文本仍只去极短导航噪声行）；Online MCP 工具必须把结构化结果 JSON 序列化进 `raw_result`（禁止 `str(dict)`），物化层解包 `raw_result`（兼容 JSON 字符串 / Python repr / text blocks）。Tavily remote MCP 常见为 `[{type:text, text:"{...results...}"}]`：解包时若 JSON 不是正文结构，须保留原 JSON 字符串再解析 `results`，不得把 text blocks 误当成结果条目。工具 JSON 内 `ok=false` 时 `_call_tool` 外层也记失败。DevTools 仅作 HITL 观测，结果经 `compact_devtools_observation` 截断后写入 `web_hitl_decisions`，不进入证据库。
   - Web 类型任务调用 Tavily MCP；请求条数由 `WEB_SEARCH_TAVILY_MAX_RESULTS` 控制（默认 5，限制 1–10）。Tavily 不进入汇总 LLM；代码按 `title` / `score` / `url` / `snippet`(取 `content`) / `published_at` 保留并物化为候选。
   - `official_docs`、`github`、`changelog` 任务调用 Context7 MCP；官方文档不进入汇总 LLM、不做搜索相关性打分；代码保留 `docs_result` / `resolve_result`（及 `library_id`）并物化为候选，`snippet` 不承载文档正文；证据层对其采用权威加权分桶，并把 `docs_result` / `resolve_result` 写入 `EvidenceItem`。
@@ -168,7 +168,7 @@ ResearchOps Agent 使用 LangGraph 编排研究流程，将用户问题拆解为
 - Input Guard 不通过时，降级原因必须来自 `input_guard_result.downgrade_reason`、`detected_risks` 或明确的“输入安全检查未通过”，不能输出无原因的降级报告。
 - `strategy_iteration` 回到 `plan_research` 前必须写入 `planning_mode = "iteration"` 和 `search_iteration_context`，用于和第一次研究规划区分。
 - `generate_research_report` 负责普通报告和降级报告正文生成（LLM）；`used_in_final_report` / `final_citation_count` 以报告实际引用的合法 `evidence_id` 为准。
-- `safety_review` 在写入 `final_report` 时由**代码**追加 `## 引用证据` 附录（不经 LLM）：只列实际引用的代号与 title；按 `source_type` 区分 Web（非 `local_document` / `structured_mock`）与 Local；Web 有 http(s) URL 时写 `[Exx][title](url)`；无 URL 的 Web 与 `structured_mock` 写 `[Exx] title`；`local_document` 从 `url_or_path` 取 md 文件名，写 `[Exx] \`filename.md\` — title`（title 与文件名 stem 相同时省略 title）。若正文已含同名章节则不重复追加。`local_rag` 归入 Web 分组（chunk 通常带公开文档 URL，便于超链接）。
+- `safety_review` 在写入 `final_report` 时由**代码**追加 `## 引用证据` 附录（不经 LLM）：只列实际引用的代号与 title；按 `source_type` 区分 Web（非 `local_document` / `local_rag` / `structured_mock`）与 Local；Web 有 http(s) URL 时写 `[Exx][title](url)`；无 URL 的 Web 与 `structured_mock` 写 `[Exx] title`；`local_document` 从 `url_or_path` 取 md 文件名，写 `[Exx] \`filename.md\` — title`（title 与文件名 stem 相同时省略 title）；`local_rag` 归入 Local，写 `[Exx] local_rag: {source_name} | [title](url)`（无 http(s) URL 时省略链接，仅写 title）。若正文已含同名章节则不重复追加。
 - 报告 Prompt 的证据上下文采用分层供给：全量短目录（title / source / url / 短摘要）+ 按题精选落盘长文（有 `content_path`、按可靠性取 top N、单条与总字符封顶）；无长文时须在 limitations 披露摘要级证据边界。
 - Input Guard 不通过时跳过规划和检索，但仍经过报告 Review、Safety Review 和产物持久化。
 - `degraded = true` 的报告由质量 Review 直接放行，继续执行 Safety Review。
@@ -249,7 +249,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 {
     "final_report": "outputs/reports/<run_id>.md",
     "metrics": "outputs/runs/<run_id>_metrics.json",
-    "executed_mermaid_png": "outputs/runs/<run_id>_executed.png",
+    "executed_mermaid_png": "outputs/runs/<run_id>_executed.png",  # 可选；mermaid.ink 渲染失败时省略
 }
 ```
 
@@ -328,9 +328,10 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
 
 - `src/config/settings.py` 导入时加载项目根 `.env`。Studio 输入仅含 `user_query`；预算和阈值由环境变量管理。
 - LLM 基础配置：`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`。节点模型覆盖：`SAFETY_GUARD_MODEL`、`RESEARCH_PLANNER_MODEL`、`SEARCH_TASK_PLANNER_MODEL`、`WEB_SEARCH_SUBAGENT_MODEL`、`LOCAL_DOCUMENT_SEARCH_MODEL`、`RESEARCH_REPORT_MODEL`、`RESEARCH_REPORT_REVIEW_MODEL`。
+- DashScope 兼容接口调用统一经 `build_chat_model` 传入 `extra_body.enable_thinking`；默认 `DASHSCOPE_ENABLE_THINKING=false`。`qwen3.7-max` 等混合思考模型默认开思考，非流式 `invoke` 会出现长时间无输出（报告生成尤甚）；结构化 JSON 节点必须显式关闭，除非用户将 `DASHSCOPE_ENABLE_THINKING` 设为 true。
 - 只有模型名为 `deepseek-chat` 或 `deepseek-reasoner` 时使用 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`；DashScope 托管的 `deepseek-v4-*` 仍使用 DashScope。
 - 工作流必需配置：`MAX_SEARCH_STEPS`、`MAX_REVIEW_REVISIONS`、`MAX_SAFETY_REVISIONS`、`HITL_CONFLICT_THRESHOLD`、`REVIEW_PASS_SCORE`。冲突项 `hitl_need_score=6.0`，默认阈值 9.0 时不触发冲突 HITL。
-- 在线检索配置：`WEB_SEARCH_PROVIDER`（`serp`|`ydc`）、`SERPAPI_API_KEY`、`YDC_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限。
+- 在线检索配置：`WEB_SEARCH_PROVIDER`（`serp`|`ydc`）、`SERPAPI_API_KEY`、`YDC_API_KEY`、`TAVILY_API_KEY`、`CONTEXT7_API_KEY`、`ONLINE_MCP_TIMEOUT_SECONDS`、`WEB_SEARCH_SERPAPI_NUM`、`WEB_SEARCH_SERPAPI_KEEP_TOP_N`、`WEB_SEARCH_TAVILY_MAX_RESULTS`、`WEB_SEARCH_CONTEXT7_MAX_CHARS`、`WEB_SEARCH_PLAYWRIGHT_MAX_CHARS`、`WEB_SEARCH_SERPAPI_TOP1_HIGH_SCORE`、`WEB_SEARCH_TASK_CONCURRENCY`。对应 key 缺失时该工具返回 `ok=false`，由 Web SubAgent 继续汇总其他可用来源；`WEB_SEARCH_TASK_CONCURRENCY` 默认 3，控制同一节点内 Web 任务并发上限；Playwright MCP 调用与其全局并发槽等待均受 `ONLINE_MCP_TIMEOUT_SECONDS` 限制，超时返回 `ok=false`，不得无限阻塞节点。
 - 报告证据供给配置：`REPORT_EVIDENCE_SNIPPET_MAX_CHARS`（短目录摘要，默认 300）、`REPORT_EVIDENCE_BODY_MAX_CHARS`（单条精选长文，默认 2500）、`REPORT_EVIDENCE_BODIES_PER_QUESTION`（每题最多精选条数，默认 2）、`REPORT_EVIDENCE_BODIES_TOTAL_CHARS`（精选长文总预算，默认 28000）。仅 `content_path` 可读且长度 ≥ 400 的证据进入精选正文；按 `reliability_score` 排序，超出总预算时从低分起不再纳入。
 - Playwright MCP 通过 stdio 启动 `npx -y @playwright/mcp --headless --isolated --browser chrome`；Tavily 通过 `mcp-remote` stdio 代理；Context7 使用 streamable HTTP。
 - DevTools 配置：`ENABLE_HITL_DEVTOOLS` 默认 true，`HITL_DEVTOOLS_HEADLESS` 默认 false；仅在 Web HITL 且结果需要登录时实际调用 `chrome-devtools-mcp@latest`。
@@ -399,7 +400,7 @@ src/llm + src/tools + src/evaluators + src/dataset + src/config
   - `safety_risk_level`
   - `source_contribution`
   - `web_hitl_trigger_count_by_source`
-- `persist_outputs` 使用 UTC 微秒时间戳加随机后缀生成 `run_id`，避免并发运行覆盖产物；写入报告、metrics 和实际运行链路 PNG；产物路径只保留在 `output_artifacts`，不保存 `.mmd` 文件；Mermaid PNG 使用 mermaid.ink 在线 API，网络不可用、5xx 或 404 等 API 失败时统一额外重试一次，第二次仍失败则显式抛错；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
+- `persist_outputs` 使用 UTC 微秒时间戳加随机后缀生成 `run_id`，避免并发运行覆盖产物；写入报告、metrics，并尽量写入实际运行链路 PNG；产物路径只保留在 `output_artifacts`，不保存 `.mmd` 文件；Mermaid PNG 使用 mermaid.ink 在线 API，网络不可用、5xx 或 404 等 API 失败时统一额外重试一次，第二次仍失败则**跳过 PNG**（`output_artifacts` 省略 `executed_mermaid_png`），报告与 metrics 仍须成功落盘，节点不得因此失败；`final_citation_count` 取自报告实际引用的 `used_evidence_ids`。
 - 实际运行图生成规则：
   - 节点集合固定为主图全部业务节点；已执行节点按职责着色，未执行节点使用 `skipped` 虚线样式。
   - 边集合固定为主图拓扑；已走边用实线，未走边用虚线并标注「未执行」。

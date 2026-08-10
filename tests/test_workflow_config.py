@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.config.settings import get_model_config, get_workflow_config
+from src.llm import chat as chat_module
 
 
 class ModelConfigTest(unittest.TestCase):
@@ -47,6 +48,57 @@ class ModelConfigTest(unittest.TestCase):
         self.assertEqual(config.model, "deepseek-chat")
         self.assertEqual(config.api_key, "deepseek-key")
         self.assertEqual(config.base_url, "https://deepseek.example/v1")
+
+    def test_build_chat_model_disables_dashscope_thinking_by_default(self) -> None:
+        """DashScope 模型默认关闭 enable_thinking，避免报告节点长时间无输出。"""
+
+        env = {
+            "DASHSCOPE_API_KEY": "dashscope-key",
+            "DASHSCOPE_BASE_URL": "https://dashscope.example/v1",
+            "DASHSCOPE_MODEL": "qwen3.7-max-2026-06-08",
+            "RESEARCH_REPORT_MODEL": "qwen3.7-max-2026-06-08",
+            "DASHSCOPE_ENABLE_THINKING": "",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_chat_openai(**kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return MagicMock(name="ChatOpenAI")
+
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(chat_module, "ChatOpenAI", side_effect=fake_chat_openai),
+        ):
+            chat_module.build_chat_model("research_report")
+
+        self.assertEqual(
+            captured.get("extra_body"),
+            {"enable_thinking": False},
+        )
+
+    def test_build_chat_model_skips_thinking_flag_for_native_deepseek(self) -> None:
+        """DeepSeek 官方接口不传 DashScope enable_thinking。"""
+
+        env = {
+            "DASHSCOPE_API_KEY": "dashscope-key",
+            "DASHSCOPE_MODEL": "qwen3.7-plus",
+            "RESEARCH_REPORT_MODEL": "deepseek-chat",
+            "DEEPSEEK_API_KEY": "deepseek-key",
+            "DEEPSEEK_BASE_URL": "https://deepseek.example/v1",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_chat_openai(**kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return MagicMock(name="ChatOpenAI")
+
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(chat_module, "ChatOpenAI", side_effect=fake_chat_openai),
+        ):
+            chat_module.build_chat_model("research_report")
+
+        self.assertNotIn("extra_body", captured)
 
 
 class WorkflowConfigTest(unittest.TestCase):

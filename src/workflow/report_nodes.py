@@ -541,7 +541,9 @@ def _apply_citation_usage(
     return updated_items, base_index
 
 
-_LOCAL_EVIDENCE_SOURCE_TYPES = frozenset({"local_document", "structured_mock"})
+_LOCAL_EVIDENCE_SOURCE_TYPES = frozenset(
+    {"local_document", "local_rag", "structured_mock"}
+)
 _CITED_EVIDENCE_SECTION = "## 引用证据"
 
 
@@ -599,7 +601,7 @@ def _format_cited_evidence_line(
     *,
     as_web: bool,
 ) -> str:
-    """格式化单条引用证据：代号与 title；local_document 附带 md 文件名。"""
+    """格式化单条引用证据：代号与 title；local_rag / local_document 有专用形态。"""
 
     title = str(evidence.get("title") or evidence_id).strip() or evidence_id
     if as_web:
@@ -607,6 +609,16 @@ def _format_cited_evidence_line(
         if url:
             return f"- [{evidence_id}][{_escape_markdown_link_text(title)}]({url})"
         return f"- [{evidence_id}] {title}"
+
+    source_type = str(evidence.get("source_type") or "")
+    if source_type == "local_rag":
+        source_name = str(evidence.get("source_name") or "local_rag").strip() or "local_rag"
+        url = _web_evidence_url(evidence)
+        if url:
+            title_part = f"[{_escape_markdown_link_text(title)}]({url})"
+        else:
+            title_part = title
+        return f"- [{evidence_id}] local_rag: {source_name} | {title_part}"
 
     filename = _local_document_filename(evidence)
     if filename:

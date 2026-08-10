@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -38,6 +39,7 @@ from src.llm.chat import build_chat_model
 from src.llm.prompt_loader import load_prompt, render_prompt_template
 from src.llm.structured_outputs import WebSearchSubAgentResultOutput
 from src.tools.online_mcp_tools import (
+    ONLINE_MCP_TIMEOUT_SECONDS,
     context7_mcp_query,
     playwright_mcp_fetch_page,
     tavily_mcp_search,
@@ -86,6 +88,7 @@ _TOOL_SEMAPHORES = {
     for tool_name, limit in _TOOL_CONCURRENCY_LIMITS.items()
 }
 _PLAYWRIGHT_SEMAPHORE = threading.Semaphore(_PLAYWRIGHT_CONCURRENCY_LIMIT)
+logger = logging.getLogger(__name__)
 
 
 def _read_bounded_int_env(
@@ -443,6 +446,32 @@ def _call_tool(name: str, tool_obj: Any, payload: dict[str, Any]) -> dict[str, A
 
     if semaphore is None:
         return _invoke()
+
+    if name.startswith("playwright_mcp_fetch"):
+        acquired = semaphore.acquire(blocking=False)
+        if not acquired:
+            logger.warning(
+                "Playwright 并发槽已被占用，最多等待 %s 秒：%s",
+                ONLINE_MCP_TIMEOUT_SECONDS,
+                name,
+            )
+            acquired = semaphore.acquire(timeout=ONLINE_MCP_TIMEOUT_SECONDS)
+        if not acquired:
+            return {
+                "tool_name": name,
+                "ok": False,
+                "input": payload,
+                "output": None,
+                "error": (
+                    "等待 Playwright 并发槽超时："
+                    f"{ONLINE_MCP_TIMEOUT_SECONDS} 秒"
+                ),
+            }
+        try:
+            return _invoke()
+        finally:
+            semaphore.release()
+
     with semaphore:
         return _invoke()
 
@@ -2041,26 +2070,121 @@ def _parse_llm_json_content(content: Any) -> dict[str, Any]:
     return parsed
 
 
-def _coerce_web_summarize_dict(payload: dict[str, Any]) -> dict[str, Any]:
+DEFAULT_SUMMARIZE_SCORE = 0.5
+DEFAULT_SUMMARIZE_SCORE_REASON = "LLM 未返回分数字段，已用默认分。"
+_SUMMARIZE_SCORE_FIELDS = (
+    "relevance_score",
+    "answer_coverage_score",
+    "source_confidence_score",
+    "freshness_score",
+)
+
+
+def _lookup_serp_fallback(
+    item: dict[str, Any],
+    *,
+    index: int,
+    serp_results: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """按 title 或索引从压缩主搜索结果回填残缺字段。"""
+
+    if not serp_results:
+        return None
+    title = item.get("title")
+    if isinstance(title, str) and title.strip():
+        needle = title.strip().casefold()
+        for candidate in serp_results:
+            cand_title = candidate.get("title")
+            if isinstance(cand_title, str) and cand_title.strip().casefold() == needle:
+                return candidate
+    if 0 <= index < len(serp_results):
+        return serp_results[index]
+    return None
+
+
+def _coerce_web_summarize_result_item(
+    item: dict[str, Any],
+    *,
+    provider: str,
+    index: int,
+    serp_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """归一化单条汇总候选；缺分数字段时填默认分，缺 URL 则丢弃。"""
+
+    result = dict(item)
+    fallback = _lookup_serp_fallback(
+        result,
+        index=index,
+        serp_results=serp_results,
+    )
+    if fallback is not None:
+        for key in ("title", "snippet", "published_at"):
+            current = result.get(key)
+            if key == "published_at":
+                if current is None and fallback.get(key) is not None:
+                    result[key] = fallback.get(key)
+                continue
+            if not isinstance(current, str) or not current.strip():
+                fb_value = fallback.get(key)
+                if isinstance(fb_value, str) and fb_value.strip():
+                    result[key] = fb_value.strip()
+        url_or_path = result.get("url_or_path")
+        if not isinstance(url_or_path, str) or not url_or_path.strip():
+            fb_url = fallback.get("url")
+            if isinstance(fb_url, str) and fb_url.strip():
+                result["url_or_path"] = fb_url.strip()
+
+    url_or_path = result.get("url_or_path")
+    if not isinstance(url_or_path, str) or not url_or_path.strip():
+        url = result.get("url")
+        if isinstance(url, str) and url.strip():
+            result["url_or_path"] = url.strip()
+
+    if not isinstance(result.get("url_or_path"), str) or not result["url_or_path"].strip():
+        return None
+
+    if not isinstance(result.get("source_name"), str) or not result["source_name"]:
+        result["source_name"] = provider
+
+    if not isinstance(result.get("title"), str):
+        result["title"] = str(result.get("title") or result["url_or_path"])
+    if not isinstance(result.get("snippet"), str):
+        result["snippet"] = ""
+
+    for score_key in _SUMMARIZE_SCORE_FIELDS:
+        result[score_key] = _score_or_default(
+            result.get(score_key),
+            DEFAULT_SUMMARIZE_SCORE,
+        )
+    if not isinstance(result.get("score_reason"), str) or not result["score_reason"].strip():
+        result["score_reason"] = DEFAULT_SUMMARIZE_SCORE_REASON
+    return result
+
+
+def _coerce_web_summarize_dict(
+    payload: dict[str, Any],
+    *,
+    serp_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """归一化汇总 LLM 常见字段漂移。"""
 
     if not isinstance(payload, dict):
         raise ValueError("Web 汇总 LLM 输出必须是 JSON 对象")
 
     data = dict(payload)
+    provider = _web_search_provider()
     coerced_results: list[dict[str, Any]] = []
-    for item in data.get("results") or []:
+    for index, item in enumerate(data.get("results") or []):
         if not isinstance(item, dict):
             continue
-        result = dict(item)
-        url_or_path = result.get("url_or_path")
-        if not isinstance(url_or_path, str) or not url_or_path.strip():
-            url = result.get("url")
-            if isinstance(url, str) and url.strip():
-                result["url_or_path"] = url.strip()
-        if not isinstance(result.get("source_name"), str) or not result["source_name"]:
-            result["source_name"] = _web_search_provider()
-        coerced_results.append(result)
+        coerced = _coerce_web_summarize_result_item(
+            item,
+            provider=provider,
+            index=index,
+            serp_results=serp_results,
+        )
+        if coerced is not None:
+            coerced_results.append(coerced)
     data["results"] = coerced_results
 
     if "needs_page_fetch" not in data:
@@ -2115,7 +2239,7 @@ def _summarize_web_tool_outputs(
         ]
     )
     payload = _parse_llm_json_content(getattr(response, "content", response))
-    coerced = _coerce_web_summarize_dict(payload)
+    coerced = _coerce_web_summarize_dict(payload, serp_results=serp_results)
     return WebSearchSubAgentResultOutput.model_validate(coerced).model_dump()
 
 

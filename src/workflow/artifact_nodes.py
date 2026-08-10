@@ -344,18 +344,20 @@ def _write_executed_graph_png(
     runs_dir: Path,
     run_id: str,
     executed_nodes: list[str],
-) -> str:
-    """静默保存实际运行链路 PNG。"""
+) -> str | None:
+    """静默保存实际运行链路 PNG；渲染失败时返回 None。"""
 
     mermaid = _build_executed_mermaid(executed_nodes)
     png_path = runs_dir / f"{run_id}_executed.png"
     png_bytes = _draw_mermaid_png_with_one_retry(mermaid)
+    if png_bytes is None:
+        return None
     png_path.write_bytes(png_bytes)
     return str(png_path)
 
 
-def _draw_mermaid_png_with_one_retry(mermaid: str) -> bytes:
-    """mermaid.ink 调用失败时统一重试一次。"""
+def _draw_mermaid_png_with_one_retry(mermaid: str) -> bytes | None:
+    """mermaid.ink 调用失败时统一重试一次；仍失败则返回 None。"""
 
     for attempt in range(2):
         try:
@@ -366,8 +368,8 @@ def _draw_mermaid_png_with_one_retry(mermaid: str) -> bytes:
             )
         except ValueError:
             if attempt == 1:
-                raise
-    raise RuntimeError("Mermaid PNG 重试流程异常结束")
+                return None
+    return None
 
 
 def _build_run_id() -> str:
@@ -453,12 +455,15 @@ def persist_outputs(state: ResearchState) -> dict[str, Any]:
         encoding="utf-8",
     )
 
+    artifacts: dict[str, str] = {
+        "final_report": str(report_path),
+        "metrics": str(metrics_path),
+    }
+    if executed_mermaid_png_path is not None:
+        artifacts["executed_mermaid_png"] = executed_mermaid_png_path
+
     return {
         "executed_nodes": ["persist_outputs"],
-        "output_artifacts": {
-            "final_report": str(report_path),
-            "metrics": str(metrics_path),
-            "executed_mermaid_png": executed_mermaid_png_path,
-        },
+        "output_artifacts": artifacts,
         "evaluation_metrics": metrics,
     }

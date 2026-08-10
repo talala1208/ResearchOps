@@ -94,18 +94,61 @@ class PersistOutputsSmokeTest(unittest.TestCase):
         for call in draw.call_args_list:
             self.assertEqual(call.kwargs["max_retries"], 0)
 
-    def test_mermaid_api_second_failure_is_exposed(self) -> None:
-        """mermaid.ink 连续失败时应在一次重试后显式抛错。"""
+    def test_mermaid_api_second_failure_skips_png(self) -> None:
+        """mermaid.ink 连续失败时应跳过 PNG，不抛错。"""
 
         with patch.object(
             artifact_nodes,
             "draw_mermaid_png",
-            side_effect=ValueError("mermaid.ink unavailable"),
+            side_effect=ValueError("Status code: 404"),
         ) as draw:
-            with self.assertRaisesRegex(ValueError, "unavailable"):
-                artifact_nodes._draw_mermaid_png_with_one_retry("graph TD")
+            result = artifact_nodes._draw_mermaid_png_with_one_retry("graph TD")
 
+        self.assertIsNone(result)
         self.assertEqual(draw.call_count, 2)
+
+    def test_persist_outputs_continues_when_mermaid_png_fails(self) -> None:
+        """mermaid.ink 失败时仍保存报告与 metrics，并省略 PNG 产物路径。"""
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            project_root = Path(tmp_dir)
+            state = {
+                "final_report": "# Smoke\n\nPNG 失败降级测试。\n",
+                "executed_nodes": ["input_guard", "plan_research", "safety_review"],
+                "entity_index": {"used_evidence_ids": []},
+                "evidence_items": {},
+                "conflicts": {},
+                "web_hitl_decisions": [],
+            }
+
+            with (
+                patch.object(
+                    artifact_nodes, "get_project_root", return_value=project_root
+                ),
+                patch.object(
+                    artifact_nodes,
+                    "get_workflow_config",
+                    return_value=SimpleNamespace(
+                        max_search_steps=3,
+                        max_review_revisions=1,
+                        max_safety_revisions=1,
+                    ),
+                ),
+                patch.object(
+                    artifact_nodes,
+                    "draw_mermaid_png",
+                    side_effect=ValueError("Status code: 404"),
+                ),
+            ):
+                result = artifact_nodes.persist_outputs(state)
+
+            artifacts = result["output_artifacts"]
+            self.assertTrue(Path(artifacts["final_report"]).exists())
+            self.assertTrue(Path(artifacts["metrics"]).exists())
+            self.assertNotIn("executed_mermaid_png", artifacts)
+            self.assertFalse(
+                list((project_root / "outputs" / "runs").glob("*_executed.png"))
+            )
 
     def test_run_id_is_unique_and_contains_microseconds(self) -> None:
         """连续运行应生成不同且包含微秒与随机后缀的 ID。"""

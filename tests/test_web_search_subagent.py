@@ -1143,6 +1143,32 @@ class WebSearchSubAgentDispatchTest(unittest.TestCase):
 class WebSearchToolConcurrencyLimitTest(unittest.TestCase):
     """验证高成本工具的分级并发限流。"""
 
+    def test_playwright_semaphore_wait_timeout_returns_failure(self) -> None:
+        """Playwright 并发槽被占用时应在超时后返回失败，不能无限等待。"""
+
+        semaphore = threading.Semaphore(1)
+        self.assertTrue(semaphore.acquire(blocking=False))
+
+        class FakeTool:
+            def invoke(self, payload: dict) -> str:
+                raise AssertionError("不应在未获得并发槽时调用 Playwright 工具")
+
+        try:
+            with (
+                patch.object(web_search_subagent, "_PLAYWRIGHT_SEMAPHORE", semaphore),
+                patch.object(web_search_subagent, "ONLINE_MCP_TIMEOUT_SECONDS", 0),
+            ):
+                result = web_search_subagent._call_tool(
+                    "playwright_mcp_fetch_page",
+                    FakeTool(),
+                    {"url": "https://example.com"},
+                )
+        finally:
+            semaphore.release()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("等待 Playwright 并发槽超时：0 秒", result["error"])
+
     def test_playwright_and_tavily_do_not_overlap(self) -> None:
         """Playwright 与 Tavily 各自并发上限应为 1。"""
 
@@ -1267,6 +1293,79 @@ class WebSearchSummarizeFallbackTest(unittest.TestCase):
             )
 
         self.assertEqual(coerced["results"][0]["source_name"], "ydc")
+
+    def test_coerce_fills_missing_score_fields_and_backfills_url(self) -> None:
+        """缺分数字段时填默认分，并可按 title 回填 URL/snippet。"""
+
+        serp_results = [
+            {
+                "title": "Keep me",
+                "url": "https://example.com/keep",
+                "snippet": "keep snippet",
+                "published_at": None,
+            },
+            {
+                "title": "How we Decide",
+                "url": "https://example.com/decide",
+                "snippet": "decision snippet",
+                "published_at": None,
+            },
+        ]
+        with patch.dict("os.environ", {"WEB_SEARCH_PROVIDER": "ydc"}):
+            coerced = web_search_subagent._coerce_web_summarize_dict(
+                {
+                    "results": [
+                        {
+                            "title": "Keep me",
+                            "url_or_path": "https://example.com/keep",
+                            "snippet": "keep snippet",
+                            "source_name": "ydc",
+                            "relevance_score": 0.9,
+                            "answer_coverage_score": 0.8,
+                            "source_confidence_score": 0.7,
+                            "freshness_score": 0.6,
+                            "score_reason": "完整打分",
+                        },
+                        {
+                            "title": "How we Decide",
+                            "source_name": "ydc",
+                        },
+                    ],
+                    "needs_page_fetch": False,
+                    "fetch_url": None,
+                    "fetch_reason": None,
+                },
+                serp_results=serp_results,
+            )
+
+        from src.llm.structured_outputs import WebSearchSubAgentResultOutput
+
+        parsed = WebSearchSubAgentResultOutput.model_validate(coerced)
+        self.assertEqual(len(parsed.results), 2)
+        incomplete = parsed.results[1]
+        self.assertEqual(incomplete.url_or_path, "https://example.com/decide")
+        self.assertEqual(incomplete.snippet, "decision snippet")
+        self.assertEqual(incomplete.relevance_score, 0.5)
+        self.assertEqual(incomplete.answer_coverage_score, 0.5)
+        self.assertEqual(incomplete.source_confidence_score, 0.5)
+        self.assertEqual(incomplete.freshness_score, 0.5)
+        self.assertIn("默认分", incomplete.score_reason)
+
+    def test_coerce_drops_results_without_url(self) -> None:
+        """无法回填 URL 的残缺条目应丢弃，而不是让校验失败。"""
+
+        coerced = web_search_subagent._coerce_web_summarize_dict(
+            {
+                "results": [
+                    {
+                        "title": "orphan",
+                        "source_name": "ydc",
+                    }
+                ],
+                "needs_page_fetch": False,
+            }
+        )
+        self.assertEqual(coerced["results"], [])
 
     def test_summarize_uses_json_object_response_format(self) -> None:
         """汇总调用应绑定 json_object，再自行归一化。"""
