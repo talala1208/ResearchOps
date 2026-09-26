@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1638" font-family="-apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#0f172a" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="1080" height="1638" fill="#ffffff"/>
+
+  <!-- ═══ stage bands ═══ -->
+  <rect x="0" y="0"    width="1080" height="344" rx="18" fill="#f6f4fe"/>
+  <rect x="0" y="366"  width="1080" height="344" rx="18" fill="#edf9f7"/>
+  <rect x="0" y="732"  width="1080" height="448" rx="18" fill="#fdf8ec"/>
+  <rect x="0" y="1202" width="1080" height="436" rx="18" fill="#eef4fd"/>
+
+  <!-- band headers -->
+  <text x="60" y="40" font-size="19" font-weight="700" fill="#7c3aed">输入与规划</text>
+  <text x="60" y="62" font-size="11" letter-spacing="3" fill="#a78bfa">GUARD · PLAN</text>
+  <text x="60" y="406" font-size="19" font-weight="700" fill="#0d9488">多源检索</text>
+  <text x="60" y="428" font-size="11" letter-spacing="3" fill="#4db8ab">MULTI-SOURCE RETRIEVE</text>
+  <text x="60" y="772" font-size="19" font-weight="700" fill="#b45309">证据治理</text>
+  <text x="60" y="794" font-size="11" letter-spacing="3" fill="#caa25a">EVIDENCE GOVERNANCE</text>
+  <text x="60" y="1242" font-size="19" font-weight="700" fill="#2563eb">报告生成</text>
+  <text x="60" y="1264" font-size="11" letter-spacing="3" fill="#7fa8e8">REPORT · SAFETY</text>
+
+  <!-- ═══ edges ═══ -->
+  <g fill="none" stroke="#94a3b8" stroke-width="1.8">
+    <path d="M540 134 V168" marker-end="url(#arr)"/>
+    <path d="M540 232 V260" marker-end="url(#arr)"/>
+    <path d="M275 292 H420" marker-end="url(#arr)"/>
+    <path d="M470 324 V352 H230 V538" marker-end="url(#arr)"/>
+    <path d="M610 324 V352 H800 V444" marker-end="url(#arr)"/>
+    <path d="M800 508 V538" marker-end="url(#arr)"/>
+    <path d="M940 476 H990 V664 H942" marker-end="url(#arr)"/>
+    <path d="M800 602 V632" marker-end="url(#arr)"/>
+    <path d="M230 602 V760 H500 V804" marker-end="url(#arr)"/>
+    <path d="M800 696 V760 H580 V804" marker-end="url(#arr)"/>
+    <path d="M540 868 V900" marker-end="url(#arr)"/>
+    <path d="M540 964 V996" marker-end="url(#arr)"/>
+    <path d="M540 1060 V1092" marker-end="url(#arr)"/>
+    <path d="M540 1156 V1258" marker-end="url(#arr)"/>
+    <path d="M370 1298 H400" marker-end="url(#arr)"/>
+    <path d="M540 1330 V1354" marker-end="url(#arr)"/>
+    <path d="M540 1418 V1442" marker-end="url(#arr)"/>
+    <path d="M540 1498 V1526" marker-end="url(#arr)"/>
+    <path d="M670 1554 H820" marker-end="url(#arr)"/>
+  </g>
+  <g fill="none" stroke="#b3bcc7" stroke-width="1.8" stroke-dasharray="5 5">
+    <path d="M680 950 H850 V1016" marker-end="url(#arr)"/>
+    <path d="M735 1048 H682" marker-end="url(#arr)"/>
+    <path d="M400 1124 H307" marker-end="url(#arr)"/>
+    <path d="M75 1124 H56 V292 H83" marker-end="url(#arr)"/>
+    <path d="M280 1152 V1266" marker-end="url(#arr)"/>
+    <path d="M680 200 H1024 V1248 H230 V1264" marker-end="url(#arr)"/>
+    <path d="M680 1386 H720 V1290 H682" marker-end="url(#arr)"/>
+  </g>
+
+  <!-- edge labels -->
+  <g font-size="12" fill="#6b7280">
+    <text x="700" y="942">可选人工复核</text>
+    <text x="308" y="1110">证据不足</text>
+    <text x="552" y="1214">证据充分</text>
+    <text x="292" y="1214">预算耗尽</text>
+    <text x="726" y="1344">修订</text>
+    <text x="996" y="1050" transform="rotate(90 996 1050)" fill="#94a3b8">输入不合规 · 降级</text>
+  </g>
+
+  <!-- ═══ nodes ═══ -->
+  <!-- start / end pills -->
+  <rect x="482" y="98" width="116" height="36" rx="18" fill="#8b5cf6" filter="url(#sh)"/>
+  <text x="540" y="121" text-anchor="middle" font-family="Menlo, monospace" font-size="13" fill="#ffffff">start</text>
+  <rect x="822" y="1536" width="116" height="36" rx="18" fill="#8b5cf6" filter="url(#sh)"/>
+  <text x="880" y="1559" text-anchor="middle" font-family="Menlo, monospace" font-size="13" fill="#ffffff">end</text>
+
+  <!-- band 1 -->
+  <g filter="url(#sh)">
+    <rect x="420" y="168" width="240" height="64" rx="12" fill="#ffffff" stroke="#f43f5e" stroke-width="1.5"/>
+    <rect x="420" y="260" width="240" height="64" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.5"/>
+    <rect x="85" y="264" width="190" height="56" rx="12" fill="#ffffff" stroke="#f97316" stroke-width="1.5"/>
+  </g>
+  <text x="540" y="195" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">输入护栏</text>
+  <text x="540" y="217" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">input_guard</text>
+  <text x="540" y="287" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">研究规划</text>
+  <text x="540" y="309" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">plan_research</text>
+  <text x="180" y="288" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">策略迭代</text>
+  <text x="180" y="308" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">strategy_iteration</text>
+
+  <!-- band 2 -->
+  <g filter="url(#sh)">
+    <rect x="90" y="538" width="280" height="64" rx="12" fill="#ffffff" stroke="#14b8a6" stroke-width="1.5"/>
+    <rect x="660" y="444" width="280" height="64" rx="12" fill="#ffffff" stroke="#14b8a6" stroke-width="1.5"/>
+    <rect x="660" y="538" width="280" height="64" rx="12" fill="#ffffff" stroke="#a855f7" stroke-width="1.5"/>
+    <rect x="660" y="632" width="280" height="64" rx="12" fill="#ffffff" stroke="#14b8a6" stroke-width="1.5"/>
+  </g>
+  <text x="230" y="564" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">本地文档检索</text>
+  <text x="230" y="586" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">local_document_search_tool</text>
+  <text x="800" y="470" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">Web 检索子代理</text>
+  <text x="800" y="492" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">web_search_sub_agent</text>
+  <text x="800" y="564" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">检索人工介入</text>
+  <text x="800" y="586" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">web_search_hitl_request</text>
+  <text x="800" y="658" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">检索结果就绪</text>
+  <text x="800" y="680" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">web_search_result_ready</text>
+
+  <!-- band 3 -->
+  <g filter="url(#sh)">
+    <rect x="400" y="804" width="280" height="64" rx="12" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <rect x="400" y="900" width="280" height="64" rx="12" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <rect x="735" y="1016" width="230" height="64" rx="12" fill="#ffffff" stroke="#a855f7" stroke-width="1.5"/>
+    <rect x="400" y="996" width="280" height="64" rx="12" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <rect x="400" y="1092" width="280" height="64" rx="12" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+    <rect x="75" y="1096" width="230" height="56" rx="12" fill="#ffffff" stroke="#f97316" stroke-width="1.5"/>
+  </g>
+  <text x="540" y="830" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">清洗与聚类</text>
+  <text x="540" y="852" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">sanitize_and_cluster</text>
+  <text x="540" y="926" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">证据质量评估</text>
+  <text x="540" y="948" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">evaluate_evidence_quality</text>
+  <text x="850" y="1042" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">请求人工复核</text>
+  <text x="850" y="1064" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">request_human_review</text>
+  <text x="540" y="1022" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">构建证据矩阵</text>
+  <text x="540" y="1044" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">build_evidence_matrix</text>
+  <text x="540" y="1118" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">证据充分性检查</text>
+  <text x="540" y="1140" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">check_evidence_sufficiency</text>
+  <text x="190" y="1120" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">步骤预算检查</text>
+  <text x="190" y="1140" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">check_step_budget</text>
+
+  <!-- band 4 -->
+  <g filter="url(#sh)">
+    <rect x="90" y="1266" width="280" height="64" rx="12" fill="#ffffff" stroke="#71717a" stroke-width="1.5"/>
+    <rect x="400" y="1266" width="280" height="64" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.5"/>
+    <rect x="400" y="1354" width="280" height="64" rx="12" fill="#ffffff" stroke="#64748b" stroke-width="1.5"/>
+    <rect x="420" y="1442" width="240" height="56" rx="12" fill="#ffffff" stroke="#f43f5e" stroke-width="1.5"/>
+    <rect x="410" y="1526" width="260" height="56" rx="12" fill="#ffffff" stroke="#71717a" stroke-width="1.5"/>
+  </g>
+  <text x="230" y="1292" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">准备降级报告</text>
+  <text x="230" y="1314" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">prepare_degraded_report</text>
+  <text x="540" y="1292" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">生成研究报告</text>
+  <text x="540" y="1314" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">generate_research_report</text>
+  <text x="540" y="1380" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">报告复审</text>
+  <text x="540" y="1402" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">review_research_report</text>
+  <text x="540" y="1465" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">安全审查</text>
+  <text x="540" y="1485" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">safety_review</text>
+  <text x="540" y="1549" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">结果持久化</text>
+  <text x="540" y="1569" text-anchor="middle" font-family="Menlo, monospace" font-size="10" fill="#9ca3af">persist_outputs</text>
+</svg>

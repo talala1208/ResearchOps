@@ -12,7 +12,7 @@ ResearchOps 把研究流程做成有状态 Graph：拆分子问题 → 多源并
 
 Graph 入口：`src.workflow.graph.graph`。
 
-![researchops_graph](docs/assets/graph/researchops_graph.png)
+![researchops_graph](docs/assets/graph/deepresearch-flow.svg)
 
 实际运行路径样例（标准输入及危险降级）：
 
